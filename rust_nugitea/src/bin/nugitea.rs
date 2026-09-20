@@ -14,7 +14,7 @@ use clap::{Args, Parser, Subcommand};
 
 use rust_nugitea::auth::{AllowAll, Authorizer};
 use rust_nugitea::storage_client::StorageClient;
-use rust_nugitea::{httpgit, mirror, sshgit};
+use rust_nugitea::{httpgit, mirror, sshgit, webui};
 
 #[derive(Parser)]
 #[command(name = "nugitea")]
@@ -117,7 +117,7 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
         storage: storage.clone(),
         auth: auth.clone(),
     };
-    let app = httpgit::router(state);
+    let app = httpgit::router(state.clone()).merge(webui::router(state));
 
     let sched_task = tokio::spawn(scheduler.run());
 

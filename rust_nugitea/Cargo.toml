@@ -22,3 +22,4 @@ anyhow = "1"
 async-compression = { version = "0.4", features = ["tokio", "gzip"] }
 shlex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["stream", "json", "query"] }
+leptos = { version = "0.8", features = ["ssr"] }

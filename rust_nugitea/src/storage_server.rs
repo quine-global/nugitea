@@ -27,6 +27,7 @@ use tokio_util::io::{ReaderStream, StreamReader};
 use crate::gitcmd;
 use crate::service::Service;
 use crate::storage::Store;
+use crate::tree;
 
 pub fn router(store: Arc<Store>) -> Router {
     Router::new()
@@ -36,6 +37,10 @@ pub fn router(store: Arc<Store>) -> Router {
         .route("/repos/{name}/upload-pack", post(upload_pack))
         .route("/repos/{name}/receive-pack", post(receive_pack))
         .route("/repos/{name}/git", post(run_git))
+        .route("/repos/{name}/branches", get(branches))
+        .route("/repos/{name}/tree/{ref}", get(tree_root))
+        .route("/repos/{name}/tree/{ref}/{*path}", get(tree_at_path))
+        .route("/repos/{name}/blob/{ref}/{*path}", get(blob))
         .with_state(store)
 }
 
@@ -211,5 +216,54 @@ async fn run_git(State(store): State<Arc<Store>>, Path(name): Path<String>, Json
     match gitcmd::run(&repo_path, &args).await {
         Ok(()) => StatusCode::OK.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn branches(State(store): State<Arc<Store>>, Path(name): Path<String>) -> Response {
+    let Ok(repo_path) = store.path(&name) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match tree::list_branches(&repo_path).await {
+        Ok(names) => Json(names).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn tree_root(state: State<Arc<Store>>, Path((name, git_ref)): Path<(String, String)>) -> Response {
+    tree_listing(state, name, git_ref, String::new()).await
+}
+
+async fn tree_at_path(
+    state: State<Arc<Store>>,
+    Path((name, git_ref, path)): Path<(String, String, String)>,
+) -> Response {
+    tree_listing(state, name, git_ref, path).await
+}
+
+async fn tree_listing(State(store): State<Arc<Store>>, name: String, git_ref: String, path: String) -> Response {
+    let Ok(repo_path) = store.path(&name) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match tree::list_tree(&repo_path, &git_ref, &path).await {
+        Ok(entries) => Json(entries).into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+    }
+}
+
+async fn blob(
+    State(store): State<Arc<Store>>,
+    Path((name, git_ref, path)): Path<(String, String, String)>,
+) -> Response {
+    let Ok(repo_path) = store.path(&name) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match tree::read_blob(&repo_path, &git_ref, &path).await {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(content) if !content.contains('\0') => {
+                Json(tree::BlobContent { content, binary: false }).into_response()
+            }
+            _ => Json(tree::BlobContent { content: String::new(), binary: true }).into_response(),
+        },
+        Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
     }
 }

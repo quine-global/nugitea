@@ -10,6 +10,7 @@ use tokio::net::TcpStream;
 
 use crate::names;
 use crate::service::Service;
+use crate::tree::{BlobContent, TreeEntry};
 
 #[derive(Clone)]
 pub struct StorageClient {
@@ -117,6 +118,34 @@ impl StorageClient {
         }
         let resp = req.send().await?.error_for_status()?;
         Ok(resp.bytes_stream())
+    }
+
+    pub async fn branches(&self, name: &str) -> Result<Vec<String>> {
+        Ok(self
+            .http
+            .get(self.url(&format!("/repos/{name}/branches")))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+
+    /// Lists the entries of the tree at `git_ref:path` (or `git_ref`'s
+    /// root tree, when path is empty) for the file-browser UI.
+    pub async fn tree(&self, name: &str, git_ref: &str, path: &str) -> Result<Vec<TreeEntry>> {
+        let url = if path.is_empty() {
+            self.url(&format!("/repos/{name}/tree/{git_ref}"))
+        } else {
+            self.url(&format!("/repos/{name}/tree/{git_ref}/{path}"))
+        };
+        Ok(self.http.get(url).send().await?.error_for_status()?.json().await?)
+    }
+
+    /// Reads a blob's content for the file-browser UI.
+    pub async fn blob(&self, name: &str, git_ref: &str, path: &str) -> Result<BlobContent> {
+        let url = self.url(&format!("/repos/{name}/blob/{git_ref}/{path}"));
+        Ok(self.http.get(url).send().await?.error_for_status()?.json().await?)
     }
 
     /// Opens a raw TCP connection to the storage tier's git-exec relay

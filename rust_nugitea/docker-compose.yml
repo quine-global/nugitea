@@ -1,0 +1,53 @@
+services:
+  storaged:
+    build: .
+    command:
+      - nugitea-storaged
+      - serve
+      - --http
+      - 0.0.0.0:9080
+      - --tcp
+      - 0.0.0.0:9081
+      - --repo-root
+      - /data
+    volumes:
+      - nugitea-data:/data
+    ports:
+      - "9080:9080"
+      - "9081:9081"
+    # Published on request. This API is unauthenticated and trusts its
+    # caller (see storage_server.rs) — anyone who can reach these ports can
+    # read/write any repo directly, bypassing the app tier's Authorizer
+    # checks entirely. Fine for local/trusted-network use; remove this
+    # `ports:` block (bind to a firewalled interface, or put it back behind
+    # only the compose-internal network) before exposing this on anything
+    # you don't fully trust.
+
+  app:
+    build: .
+    command:
+      - nugitea
+      - serve
+      - --http
+      - 0.0.0.0:3080
+      - --ssh
+      - 0.0.0.0:2222
+      - --storage
+      - http://storaged:9080
+      - --storage-tcp
+      - storaged:9081
+      - --state-dir
+      - /state
+      - --ssh-host-key
+      - /state/ssh_host_ed25519
+    volumes:
+      - nugitea-state:/state
+    ports:
+      - "3080:3080"
+      - "2222:2222"
+    depends_on:
+      - storaged
+
+volumes:
+  nugitea-data:
+  nugitea-state:
