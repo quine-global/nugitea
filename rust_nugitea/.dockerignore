@@ -1,4 +1,5 @@
 target
+pkg
 data
 state
 *.log

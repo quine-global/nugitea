@@ -38,6 +38,7 @@ pub fn router(store: Arc<Store>) -> Router {
         .route("/repos/{name}/receive-pack", post(receive_pack))
         .route("/repos/{name}/git", post(run_git))
         .route("/repos/{name}/branches", get(branches))
+        .route("/repos/{name}/files/{ref}", get(files))
         .route("/repos/{name}/tree/{ref}", get(tree_root))
         .route("/repos/{name}/tree/{ref}/{*path}", get(tree_at_path))
         .route("/repos/{name}/blob/{ref}/{*path}", get(blob))
@@ -226,6 +227,16 @@ async fn branches(State(store): State<Arc<Store>>, Path(name): Path<String>) -> 
     match tree::list_branches(&repo_path).await {
         Ok(names) => Json(names).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn files(State(store): State<Arc<Store>>, Path((name, git_ref)): Path<(String, String)>) -> Response {
+    let Ok(repo_path) = store.path(&name) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match tree::list_all_files(&repo_path, &git_ref).await {
+        Ok(paths) => Json(paths).into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
     }
 }
 

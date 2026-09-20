@@ -131,6 +131,19 @@ impl StorageClient {
             .await?)
     }
 
+    /// Lists every blob path in git_ref's tree, recursively — the search
+    /// island's data source.
+    pub async fn all_files(&self, name: &str, git_ref: &str) -> Result<Vec<String>> {
+        Ok(self
+            .http
+            .get(self.url(&format!("/repos/{name}/files/{git_ref}")))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+
     /// Lists the entries of the tree at `git_ref:path` (or `git_ref`'s
     /// root tree, when path is empty) for the file-browser UI.
     pub async fn tree(&self, name: &str, git_ref: &str, path: &str) -> Result<Vec<TreeEntry>> {

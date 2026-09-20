@@ -45,11 +45,16 @@ together — there's no embedded single-process mode:
 
 `names.rs` holds the one shared, pure (no I/O) repo-name validation and
 wire-form parsing used by both tiers. `webui.rs` is the file browser —
-Leptos in SSR-only mode (`.to_html()` on a composed view, no WASM/
-hydration/`cargo-leptos`, since every click here is a plain link → full
-page load, not client-side state) rendering `GET /{repo}`,
-`/{repo}/tree/{ref}/...`, and `/{repo}/blob/{ref}/...`, backed by new
-`ls-tree`/`show`/`for-each-ref` plumbing in `tree.rs` on the storage tier.
+`GET /{repo}`, `/{repo}/tree/{ref}/...`, and `/{repo}/blob/{ref}/...`,
+backed by `ls-tree`/`show`/`for-each-ref` plumbing in `tree.rs` on the
+storage tier. It's almost entirely plain Leptos SSR (`.to_html()` on a
+composed view — every click is a full-page link, no client state, so no
+WASM needed for any of it), with one deliberate exception: `search_island/`
+is a separate crate holding just the realtime "press `/` to search this
+repo's files" box, the one piece of the UI that needs actual client-side
+state. It's built with `wasm-pack` and hydrated via Leptos's `#[island]`
+mechanism — see that crate's doc comment for how, and why it's a separate
+crate rather than adding hydration to the whole app.
 
 ## Running it: two processes, always
 
@@ -89,7 +94,14 @@ open http://localhost:3080/demo        # or just visit it in a browser
 
 ### Building and running directly with cargo
 
+The search box's WASM bundle has to be built once before `cargo build`,
+since it's embedded via `include_bytes!` at compile time — `cargo build`
+will fail with a missing-file error if you skip this step. Re-run it
+whenever `search_island/` changes; Docker Compose users don't need to do
+this, it's baked into the image build.
+
 ```sh
+(cd search_island && wasm-pack build --release --target web)
 cargo build --release
 
 # storage tier — owns the disk
@@ -111,8 +123,8 @@ git clone ssh://localhost:2222/demo.git
 
 Once something's been pushed, browse it at `http://localhost:3080/demo` —
 that redirects to the default branch (`main` if it exists, else `master`,
-else whatever branch sorts first) and lets you walk the tree and view file
-contents.
+else whatever branch sorts first) and lets you walk the tree, view file
+contents, and press `/` to search the whole repo's file list in real time.
 
 Env var equivalents: `NUGITEA_STORAGE` / `NUGITEA_STORAGE_TCP` (app tier's
 `--storage`/`--storage-tcp`), `NUGITEA_STATE_DIR` (app tier's
@@ -135,3 +147,15 @@ deliberately smaller subset of Go's duration syntax.
   approximating "did the request go through," matching how HTTP has never
   surfaced git's literal exit code to its client, only logged it
   server-side.
+
+## A toolchain quirk worth knowing about
+
+If `cargo`/`wasm-pack` in `search_island/` fail with a `serde_core`
+version-conflict or "can't find crate for `serde`" error, it's very likely
+because your active `rustup` toolchain default is `nightly` rather than
+`stable` — the `#[island]` macro's generated code hit exactly this under a
+nightly toolchain in development (a `serde_core` conflict sourced from the
+toolchain's own sysroot) and building the same code with `cargo +stable` /
+`RUSTUP_TOOLCHAIN=stable wasm-pack ...` fixed it immediately. Not expected
+to matter in the Docker build (`rust:1-bookworm` tracks stable), only for
+local dev on a nightly-default toolchain.

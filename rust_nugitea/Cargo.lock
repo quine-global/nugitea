@@ -2665,6 +2665,7 @@ dependencies = [
  "rand",
  "reqwest",
  "russh",
+ "search_island",
  "serde",
  "serde_json",
  "shlex 1.3.0",
@@ -2734,6 +2735,14 @@ dependencies = [
  "pbkdf2",
  "salsa20",
  "sha2 0.11.0",
+]
+
+[[package]]
+name = "search_island"
+version = "0.1.0"
+dependencies = [
+ "leptos",
+ "serde",
 ]
 
 [[package]]

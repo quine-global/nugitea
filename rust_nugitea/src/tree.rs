@@ -94,6 +94,14 @@ pub async fn read_blob(repo_path: &Path, git_ref: &str, path: &str) -> Result<Ve
     gitcmd::run_captured(repo_path, &["show", &format!("{git_ref}:{path}")]).await
 }
 
+/// Lists every blob path in `git_ref`'s tree, recursively — the full file
+/// list the search island filters against.
+pub async fn list_all_files(repo_path: &Path, git_ref: &str) -> Result<Vec<String>> {
+    check_no_leading_dash(git_ref, "ref")?;
+    let output = gitcmd::run_captured(repo_path, &["ls-tree", "-r", "--name-only", git_ref]).await?;
+    Ok(String::from_utf8_lossy(&output).lines().map(str::to_string).collect())
+}
+
 /// Lists local branch names.
 pub async fn list_branches(repo_path: &Path) -> Result<Vec<String>> {
     let output = gitcmd::run_captured(repo_path, &["for-each-ref", "--format=%(refname:short)", "refs/heads"]).await?;

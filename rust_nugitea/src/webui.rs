@@ -1,20 +1,24 @@
 //! A minimal read-only file-browser UI, served by the app tier alongside
-//! the git protocol endpoints. Every click is a normal link (full page
-//! load) — there's no client-side state, so this renders with Leptos in
-//! SSR-only mode: components compose into a view, `.to_html()` turns that
-//! into a plain `String`, no WASM/hydration/cargo-leptos involved.
+//! the git protocol endpoints. Nearly everything here is plain Leptos SSR
+//! (components compose into a view, `.to_html()` turns that into a plain
+//! `String`) — the one exception is `<SearchBox>` from the `search_island`
+//! crate, the realtime file-search box, which needs real client-side state
+//! and so is hydrated from a small WASM bundle (see that crate's doc
+//! comment, and `island_script.js` below for how hydration is wired up
+//! without `cargo-leptos`).
 //!
 //! Reuses `httpgit::AppState` — browsing is a read, gated by
 //! `Authorizer::allow_pull` the same as clone.
 
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
     routing::get,
-    Router,
+    Json, Router,
 };
 use leptos::prelude::*;
+use search_island::SearchBox;
 
 use crate::httpgit::AppState;
 use crate::tree::{EntryKind, TreeEntry};
@@ -25,7 +29,43 @@ pub fn router(state: AppState) -> Router {
         .route("/{repo}/tree/{ref}", get(tree_root))
         .route("/{repo}/tree/{ref}/{*path}", get(tree_at_path))
         .route("/{repo}/blob/{ref}/{*path}", get(blob))
+        .route("/{repo}/api/files/{ref}", get(api_files))
+        .route("/static/search_island.js", get(search_island_js))
+        .route("/static/search_island_bg.wasm", get(search_island_wasm))
         .with_state(state)
+}
+
+// Built by `wasm-pack build --release --target web` in search_island/ —
+// see that crate's doc comment and the README for the build step. Embedded
+// directly into this binary so the app tier stays a single self-contained
+// artifact; served from the two static routes above.
+const SEARCH_ISLAND_JS: &[u8] = include_bytes!("../search_island/pkg/search_island.js");
+const SEARCH_ISLAND_WASM: &[u8] = include_bytes!("../search_island/pkg/search_island_bg.wasm");
+
+// The driver leptos itself uses to hydrate islands (see this file for
+// where it's vendored from and why): imports the wasm-bindgen module,
+// then walks the DOM for <leptos-island> elements and calls each one's
+// per-island exported hydration function. `leptos::mount::hydrate_islands()`
+// alone (the wasm module's own start function) does *not* do this DOM walk
+// itself — this script is the other required half.
+const ISLAND_SCRIPT: &str = include_str!("island_script.js");
+
+async fn search_island_js() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/javascript")], SEARCH_ISLAND_JS)
+}
+
+async fn search_island_wasm() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "application/wasm")], SEARCH_ISLAND_WASM)
+}
+
+async fn api_files(State(state): State<AppState>, Path((repo, git_ref)): Path<(String, String)>) -> Response {
+    if !state.auth.allow_pull(&repo) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    match state.storage.all_files(&repo, &git_ref).await {
+        Ok(files) => Json(files).into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+    }
 }
 
 const PAGE_CSS: &str = "
@@ -37,6 +77,14 @@ ul.entries li { padding: 0.25rem 0; border-bottom: 1px solid #eee; }
 pre { background: #f6f8fa; padding: 1rem; overflow-x: auto; border-radius: 4px; }
 a { color: #0969da; text-decoration: none; }
 a:hover { text-decoration: underline; }
+.hidden { display: none; }
+.search-island { margin-bottom: 1rem; }
+.search-toggle { font: inherit; padding: 0.3rem 0.6rem; cursor: pointer; }
+.search-toggle kbd { border: 1px solid #ccc; border-radius: 3px; padding: 0 0.3rem; }
+.search-panel { margin-top: 0.5rem; border: 1px solid #ddd; border-radius: 4px; padding: 0.5rem; max-width: 30rem; }
+.search-panel input { width: 100%; font: inherit; padding: 0.3rem; box-sizing: border-box; }
+.search-results { list-style: none; padding: 0; margin: 0.5rem 0 0; max-height: 16rem; overflow-y: auto; }
+.search-results li { padding: 0.15rem 0; }
 ";
 
 fn render_page(title: &str, body: AnyView) -> Html<String> {
@@ -52,6 +100,9 @@ fn render_page(title: &str, body: AnyView) -> Html<String> {
                     <h2>{title}</h2>
                     {body}
                 </div>
+                <script type="module">
+                    {format!("{ISLAND_SCRIPT}(\"\", \"static\", \"search_island\", \"search_island_bg\");")}
+                </script>
             </body>
         </html>
     }
@@ -168,6 +219,7 @@ async fn render_tree(State(state): State<AppState>, repo: String, git_ref: Strin
 
     let body = view! {
         <Breadcrumbs links=breadcrumb_links(&repo, &git_ref, &path) />
+        <SearchBox repo=repo.clone() git_ref=git_ref.clone() />
         <DirListing repo=repo.clone() git_ref=git_ref.clone() path=path entries=entries />
     }
     .into_any();
@@ -190,6 +242,7 @@ async fn blob(State(state): State<AppState>, Path((repo, git_ref, path)): Path<(
     };
     let body = view! {
         <Breadcrumbs links=breadcrumb_links(&repo, &git_ref, &path) />
+        <SearchBox repo=repo.clone() git_ref=git_ref.clone() />
         {content_view}
     }
     .into_any();

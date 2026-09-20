@@ -1,0 +1,17 @@
+[package]
+name = "search_island"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+leptos = { version = "0.8", default-features = false }
+serde = { version = "1", features = ["derive"] }
+gloo-net = { version = "0.6", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+
+[features]
+ssr = ["leptos/ssr", "leptos/islands"]
+hydrate = ["leptos/hydrate", "leptos/islands", "dep:gloo-net", "dep:wasm-bindgen"]
