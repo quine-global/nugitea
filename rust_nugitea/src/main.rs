@@ -9,6 +9,7 @@ mod gitcmd;
 mod httpgit;
 mod mirror;
 mod repo;
+mod service;
 mod sshgit;
 
 use std::net::SocketAddr;

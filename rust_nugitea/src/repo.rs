@@ -41,10 +41,6 @@ impl Store {
         Ok(Store { root })
     }
 
-    pub fn validate_name(name: &str) -> Result<()> {
-        validate_name(name)
-    }
-
     /// Returns the absolute path to the bare repo directory for name
     /// (without requiring it to exist).
     pub fn path(&self, name: &str) -> Result<PathBuf> {
@@ -53,10 +49,27 @@ impl Store {
     }
 
     /// Reports whether the named repo exists on disk.
-    pub fn exists(&self, name: &str) -> bool {
+    pub async fn exists(&self, name: &str) -> bool {
         match self.path(name) {
-            Ok(path) => path.is_dir(),
+            Ok(path) => tokio::fs::try_exists(&path).await.unwrap_or(false),
             Err(_) => false,
+        }
+    }
+
+    /// Resolves a wire-form repo reference — an HTTP path segment
+    /// ("demo.git") or an SSH command path ("/demo.git") — to a validated
+    /// repo name and its on-disk path, or None if the name is invalid or
+    /// the repo doesn't exist. The one place both transports go to turn
+    /// untrusted client input into a safe name, instead of each
+    /// reimplementing the strip-and-validate steps themselves.
+    pub async fn resolve(&self, raw: &str) -> Option<(String, PathBuf)> {
+        let raw = raw.strip_prefix('/').unwrap_or(raw);
+        let name = raw.strip_suffix(".git")?;
+        let path = self.path(name).ok()?;
+        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            Some((name.to_string(), path))
+        } else {
+            None
         }
     }
 

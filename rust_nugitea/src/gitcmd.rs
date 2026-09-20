@@ -22,20 +22,8 @@ fn command(args: &[&str]) -> Command {
     cmd
 }
 
-/// Runs a git command to completion, discarding stdout, failing on a
+/// Runs a git command to completion and returns its stdout, failing on a
 /// non-zero exit status.
-pub async fn run(dir: &Path, args: &[&str]) -> Result<()> {
-    let output = command(args).current_dir(dir).output().await?;
-    if !output.status.success() {
-        bail!(
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    Ok(())
-}
-
-/// Runs a git command to completion and returns its stdout.
 pub async fn run_captured(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let output = command(args).current_dir(dir).output().await?;
     if !output.status.success() {
@@ -45,6 +33,12 @@ pub async fn run_captured(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
         );
     }
     Ok(output.stdout)
+}
+
+/// Runs a git command to completion, discarding stdout, failing on a
+/// non-zero exit status.
+pub async fn run(dir: &Path, args: &[&str]) -> Result<()> {
+    run_captured(dir, args).await.map(|_| ())
 }
 
 /// Spawns a git command with stdin/stdout/stderr piped for interactive use

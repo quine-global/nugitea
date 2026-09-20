@@ -6,7 +6,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::Result;
 use async_compression::tokio::bufread::GzipDecoder;
 use axum::{
     body::Body,
@@ -22,6 +21,7 @@ use tokio_util::io::{ReaderStream, StreamReader};
 use crate::auth::Authorizer;
 use crate::gitcmd;
 use crate::repo::Store;
+use crate::service::Service;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -40,12 +40,6 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-fn repo_name_from_param(raw: &str) -> Option<String> {
-    let name = raw.strip_suffix(".git")?;
-    Store::validate_name(name).ok()?;
-    Some(name.to_string())
-}
-
 /// Matches the values git actually sends for Git-Protocol, e.g.
 /// "version=2", to avoid forwarding arbitrary header content into the
 /// subprocess environment.
@@ -60,17 +54,10 @@ async fn info_refs(
     Path(repo_git): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let Some(repo_name) = repo_name_from_param(&repo_git) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    if !state.repos.exists(&repo_name) {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-
     let Some(service) = params
         .get("service")
         .and_then(|s| s.strip_prefix("git-"))
-        .map(str::to_string)
+        .and_then(Service::from_http_param)
     else {
         return (
             StatusCode::BAD_REQUEST,
@@ -78,43 +65,30 @@ async fn info_refs(
         )
             .into_response();
     };
-    let allowed = match service.as_str() {
-        "upload-pack" => state.auth.allow_pull(&repo_name),
-        "receive-pack" => state.auth.allow_push(&repo_name),
-        _ => return (StatusCode::BAD_REQUEST, "unknown service").into_response(),
+    let Some((repo_name, repo_path)) = state.repos.resolve(&repo_git).await else {
+        return StatusCode::NOT_FOUND.into_response();
     };
-    if !allowed {
+    if !service.allow(state.auth.as_ref(), &repo_name) {
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    let Ok(repo_path) = state.repos.path(&repo_name) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-
-    let output: Result<Vec<u8>> = gitcmd::run_captured(
-        &repo_path,
-        &[service.as_str(), "--stateless-rpc", "--advertise-refs", "."],
-    )
-    .await;
-    let stdout = match output {
+    let arg = service.git_arg();
+    let stdout = match gitcmd::run_captured(&repo_path, &[arg, "--stateless-rpc", "--advertise-refs", "."]).await {
         Ok(bytes) => bytes,
         Err(e) => {
-            eprintln!("info/refs {repo_name} {service}: {e}");
+            eprintln!("info/refs {repo_name} {arg}: {e}");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
 
-    let pkt = format!("# service=git-{service}\n");
+    let pkt = format!("# service=git-{arg}\n");
     let mut body = format!("{:04x}{pkt}0000", pkt.len() + 4).into_bytes();
     body.extend_from_slice(&stdout);
 
     (
         StatusCode::OK,
         [
-            (
-                header::CONTENT_TYPE,
-                format!("application/x-git-{service}-advertisement"),
-            ),
+            (header::CONTENT_TYPE, format!("application/x-git-{arg}-advertisement")),
             (header::CACHE_CONTROL, "no-cache".to_string()),
         ],
         body,
@@ -122,28 +96,12 @@ async fn info_refs(
         .into_response()
 }
 
-async fn upload_pack(
-    state: State<AppState>,
-    path: Path<String>,
-    headers: HeaderMap,
-    req: Request,
-) -> Response {
-    service_handler(state, path, headers, req, "upload-pack", |a, r| {
-        a.allow_pull(r)
-    })
-    .await
+async fn upload_pack(state: State<AppState>, path: Path<String>, headers: HeaderMap, req: Request) -> Response {
+    service_handler(state, path, headers, req, Service::UploadPack).await
 }
 
-async fn receive_pack(
-    state: State<AppState>,
-    path: Path<String>,
-    headers: HeaderMap,
-    req: Request,
-) -> Response {
-    service_handler(state, path, headers, req, "receive-pack", |a, r| {
-        a.allow_push(r)
-    })
-    .await
+async fn receive_pack(state: State<AppState>, path: Path<String>, headers: HeaderMap, req: Request) -> Response {
+    service_handler(state, path, headers, req, Service::ReceivePack).await
 }
 
 async fn service_handler(
@@ -151,21 +109,15 @@ async fn service_handler(
     Path(repo_git): Path<String>,
     headers: HeaderMap,
     req: Request,
-    service: &'static str,
-    allow: fn(&dyn Authorizer, &str) -> bool,
+    service: Service,
 ) -> Response {
-    let Some(repo_name) = repo_name_from_param(&repo_git) else {
+    let Some((repo_name, repo_path)) = state.repos.resolve(&repo_git).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    if !state.repos.exists(&repo_name) {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    if !allow(state.auth.as_ref(), &repo_name) {
+    if !service.allow(state.auth.as_ref(), &repo_name) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let Ok(repo_path) = state.repos.path(&repo_name) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
+    let arg = service.git_arg();
 
     let mut extra_env = Vec::new();
     if let Some(proto) = headers.get("Git-Protocol").and_then(|v| v.to_str().ok()) {
@@ -174,10 +126,10 @@ async fn service_handler(
         }
     }
 
-    let mut child = match gitcmd::spawn_piped(Some(&repo_path), &[service, "--stateless-rpc", "."], &extra_env) {
+    let mut child = match gitcmd::spawn_piped(Some(&repo_path), &[arg, "--stateless-rpc", "."], &extra_env) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("spawn {service}: {e}");
+            eprintln!("spawn {arg}: {e}");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
@@ -205,7 +157,6 @@ async fn service_handler(
         drop(stdin);
     });
 
-    let repo_for_log = repo_name.clone();
     tokio::spawn(async move {
         use tokio::io::AsyncReadExt;
         let mut errbuf = Vec::new();
@@ -213,21 +164,18 @@ async fn service_handler(
         match child.wait().await {
             Ok(status) if !status.success() => {
                 eprintln!(
-                    "{repo_for_log} {service}: exited {status}: {}",
+                    "{repo_name} {arg}: exited {status}: {}",
                     String::from_utf8_lossy(&errbuf)
                 );
             }
-            Err(e) => eprintln!("{repo_for_log} {service}: wait error: {e}"),
+            Err(e) => eprintln!("{repo_name} {arg}: wait error: {e}"),
             _ => {}
         }
     });
 
     Response::builder()
         .status(StatusCode::OK)
-        .header(
-            header::CONTENT_TYPE,
-            format!("application/x-git-{service}-result"),
-        )
+        .header(header::CONTENT_TYPE, format!("application/x-git-{arg}-result"))
         .header(header::CACHE_CONTROL, "no-cache")
         .body(Body::from_stream(ReaderStream::new(stdout)))
         .unwrap()

@@ -10,17 +10,18 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use russh::keys::{Algorithm, PrivateKey};
 use russh::server::{self, Auth, Msg, Server as _, Session};
 use russh::{Channel, ChannelId};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex};
 
 use crate::auth::Authorizer;
 use crate::gitcmd;
 use crate::repo::Store;
+use crate::service::Service;
 
 struct Inner {
     repos: Arc<Store>,
@@ -81,8 +82,8 @@ impl server::Handler for GitHandler {
             Ok(()) => {
                 session.channel_success(channel)?;
             }
-            Err(msg) => {
-                session.data(channel, Bytes::from(format!("nugitea: {msg}\n")))?;
+            Err(e) => {
+                session.data(channel, Bytes::from(format!("nugitea: {e}\n")))?;
                 session.channel_failure(channel)?;
                 session.exit_status_request(channel, 1)?;
                 session.close(channel)?;
@@ -115,35 +116,52 @@ impl server::Handler for GitHandler {
     }
 }
 
+/// Reads from `reader` until EOF or error, forwarding each chunk to the
+/// channel as either normal data (`ext: None`) or extended data on the
+/// given code (`ext: Some(code)`, e.g. `Some(1)` for stderr). Shared by the
+/// stdout and stderr pumps in `GitHandler::start`.
+async fn pump_to_channel(mut reader: impl AsyncRead + Unpin, channel: ChannelId, handle: server::Handle, ext: Option<u32>) {
+    let mut buf = [0u8; 32 * 1024];
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let chunk = Bytes::copy_from_slice(&buf[..n]);
+                let sent = match ext {
+                    None => handle.data(channel, chunk).await.map_err(|_| ()),
+                    Some(code) => handle.extended_data(channel, code, chunk).await.map_err(|_| ()),
+                };
+                if sent.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
 impl GitHandler {
-    async fn start(
-        &self,
-        channel: ChannelId,
-        cmd_line: &str,
-        handle: server::Handle,
-    ) -> std::result::Result<(), String> {
-        let (verb, repo_name) = parse_git_command(cmd_line)?;
-        Store::validate_name(&repo_name).map_err(|e| e.to_string())?;
-        if !self.inner.repos.exists(&repo_name) {
-            return Err(format!("repository {repo_name:?} not found"));
-        }
-        let (allowed, git_arg) = match verb.as_str() {
-            "git-upload-pack" => (self.inner.auth.allow_pull(&repo_name), "upload-pack"),
-            "git-receive-pack" => (self.inner.auth.allow_push(&repo_name), "receive-pack"),
-            _ => return Err(format!("unsupported command {verb:?}")),
+    async fn start(&self, channel: ChannelId, cmd_line: &str, handle: server::Handle) -> Result<()> {
+        let fields = shlex::split(cmd_line).context("unsupported command")?;
+        let [verb, repo_ref] = fields.as_slice() else {
+            bail!("unsupported command");
         };
-        if !allowed {
-            return Err("forbidden".to_string());
+        let service = Service::from_ssh_verb(verb).with_context(|| format!("unsupported command {verb:?}"))?;
+        let (repo_name, repo_path) = self
+            .inner
+            .repos
+            .resolve(repo_ref)
+            .await
+            .with_context(|| format!("repository {repo_ref:?} not found"))?;
+        if !service.allow(self.inner.auth.as_ref(), &repo_name) {
+            bail!("forbidden");
         }
-        let repo_path = self.inner.repos.path(&repo_name).map_err(|e| e.to_string())?;
         let repo_path_str = repo_path.to_string_lossy().to_string();
 
-        let mut child = gitcmd::spawn_piped(None, &[git_arg, &repo_path_str], &[])
-            .map_err(|e| e.to_string())?;
+        let mut child = gitcmd::spawn_piped(None, &[service.git_arg(), &repo_path_str], &[])?;
 
         let mut stdin = child.stdin.take().expect("piped stdin");
-        let mut stdout = child.stdout.take().expect("piped stdout");
-        let mut stderr = child.stderr.take().expect("piped stderr");
+        let stdout = child.stdout.take().expect("piped stdout");
+        let stderr = child.stderr.take().expect("piped stderr");
 
         let (tx, mut rx) = mpsc::unbounded_channel::<Bytes>();
         self.stdins.lock().await.insert(channel, tx);
@@ -158,39 +176,8 @@ impl GitHandler {
                 }
             });
 
-            let out_handle = handle.clone();
-            let stdout_task = tokio::spawn(async move {
-                let mut buf = [0u8; 32 * 1024];
-                loop {
-                    match stdout.read(&mut buf).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            if out_handle
-                                .data(channel, Bytes::copy_from_slice(&buf[..n]))
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                    }
-                }
-            });
-
-            let err_handle = handle.clone();
-            let stderr_task = tokio::spawn(async move {
-                let mut buf = [0u8; 4096];
-                loop {
-                    match stderr.read(&mut buf).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            let _ = err_handle
-                                .extended_data(channel, 1, Bytes::copy_from_slice(&buf[..n]))
-                                .await;
-                        }
-                    }
-                }
-            });
+            let stdout_task = tokio::spawn(pump_to_channel(stdout, channel, handle.clone(), None));
+            let stderr_task = tokio::spawn(pump_to_channel(stderr, channel, handle.clone(), Some(1)));
 
             let status = child.wait().await;
             let _ = stdout_task.await;
@@ -209,12 +196,7 @@ impl GitHandler {
 }
 
 /// Starts the SSH server and blocks.
-pub async fn serve(
-    repos: Arc<Store>,
-    auth: Arc<dyn Authorizer>,
-    addr: SocketAddr,
-    host_key_path: PathBuf,
-) -> Result<()> {
+pub async fn serve(repos: Arc<Store>, auth: Arc<dyn Authorizer>, addr: SocketAddr, host_key_path: PathBuf) -> Result<()> {
     let key = load_or_create_host_key(&host_key_path)?;
     let config = Arc::new(server::Config {
         keys: vec![key],
@@ -236,8 +218,7 @@ fn load_or_create_host_key(path: &Path) -> Result<PrivateKey> {
         return PrivateKey::from_openssh(&data).context("parse ssh host key");
     }
 
-    let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
-        .context("generate ssh host key")?;
+    let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).context("generate ssh host key")?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -251,67 +232,4 @@ fn load_or_create_host_key(path: &Path) -> Result<PrivateKey> {
     }
 
     Ok(key)
-}
-
-const ALLOWED_VERBS: [&str; 2] = ["git-upload-pack", "git-receive-pack"];
-
-/// Extracts the verb and repo name from a raw SSH command line such as
-/// `git-upload-pack '/demo.git'`.
-fn parse_git_command(cmd_line: &str) -> std::result::Result<(String, String), String> {
-    let fields = shell_split(cmd_line)?;
-    if fields.len() != 2 {
-        return Err("unsupported command".to_string());
-    }
-    let verb = fields[0].clone();
-    if !ALLOWED_VERBS.contains(&verb.as_str()) {
-        return Err(format!("unsupported command {verb:?}"));
-    }
-    let path = fields[1].as_str();
-    let path = path.strip_prefix('/').unwrap_or(path);
-    let path = path.strip_suffix(".git").unwrap_or(path);
-    Ok((verb, path.to_string()))
-}
-
-/// Minimal POSIX-ish word splitting for the raw SSH command git clients
-/// send, just enough to strip a single layer of matching quotes around the
-/// repo path.
-fn shell_split(s: &str) -> std::result::Result<Vec<String>, String> {
-    let mut fields = Vec::new();
-    let mut cur = String::new();
-    let mut quote: Option<char> = None;
-    let mut in_field = false;
-
-    for c in s.chars() {
-        if let Some(q) = quote {
-            if c == q {
-                quote = None;
-            } else {
-                cur.push(c);
-            }
-            continue;
-        }
-        match c {
-            '\'' | '"' => {
-                quote = Some(c);
-                in_field = true;
-            }
-            ' ' | '\t' => {
-                if in_field {
-                    fields.push(std::mem::take(&mut cur));
-                    in_field = false;
-                }
-            }
-            _ => {
-                cur.push(c);
-                in_field = true;
-            }
-        }
-    }
-    if quote.is_some() {
-        return Err("unterminated quote".to_string());
-    }
-    if in_field {
-        fields.push(cur);
-    }
-    Ok(fields)
 }
