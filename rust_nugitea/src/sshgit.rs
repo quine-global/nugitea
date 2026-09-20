@@ -1,9 +1,7 @@
-//! Implements the SSH transport for git clone/push, mirroring the approach
-//! in Gitea's modules/ssh/ssh.go + cmd/serv.go: read the raw SSH command,
-//! validate the verb, and exec the matching git subcommand with stdio wired
-//! directly to the session. Unlike Gitea, nugitea execs git directly from
-//! the session handler instead of re-invoking its own binary, since there
-//! is no permission database to hop into.
+//! The app tier's SSH transport for git clone/push. Like `httpgit`, this is
+//! a thin proxy: it validates the repo name, checks `Authorizer`, and
+//! forwards the SSH session's stdin/stdout to the storage tier's raw
+//! git-exec TCP relay (`git_exec_tcp`) instead of execing git locally.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -15,22 +13,21 @@ use bytes::Bytes;
 use russh::keys::{Algorithm, PrivateKey};
 use russh::server::{self, Auth, Msg, Server as _, Session};
 use russh::{Channel, ChannelId};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex};
 
 use crate::auth::Authorizer;
-use crate::gitcmd;
-use crate::repo::Store;
 use crate::service::Service;
+use crate::storage_client::StorageClient;
 
 struct Inner {
-    repos: Arc<Store>,
+    storage: Arc<StorageClient>,
     auth: Arc<dyn Authorizer>,
 }
 
 /// Handler is cloned fresh per incoming connection by `new_client`, so
-/// `stdins` (channel -> subprocess stdin forwarder) is never shared across
-/// connections even though channel IDs are reused per-connection.
+/// `stdins` (channel -> proxy-request-body forwarder) is never shared
+/// across connections even though channel IDs are reused per-connection.
 #[derive(Clone)]
 struct GitHandler {
     inner: Arc<Inner>,
@@ -109,33 +106,10 @@ impl server::Handler for GitHandler {
         channel: ChannelId,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        // Dropping the sender closes the forwarder's mpsc receiver, which
-        // then drops the subprocess's stdin handle, delivering EOF to git.
+        // Dropping the sender closes the forwarder stream, which signals
+        // the end of the request body to the storage tier.
         self.stdins.lock().await.remove(&channel);
         Ok(())
-    }
-}
-
-/// Reads from `reader` until EOF or error, forwarding each chunk to the
-/// channel as either normal data (`ext: None`) or extended data on the
-/// given code (`ext: Some(code)`, e.g. `Some(1)` for stderr). Shared by the
-/// stdout and stderr pumps in `GitHandler::start`.
-async fn pump_to_channel(mut reader: impl AsyncRead + Unpin, channel: ChannelId, handle: server::Handle, ext: Option<u32>) {
-    let mut buf = [0u8; 32 * 1024];
-    loop {
-        match reader.read(&mut buf).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                let chunk = Bytes::copy_from_slice(&buf[..n]);
-                let sent = match ext {
-                    None => handle.data(channel, chunk).await.map_err(|_| ()),
-                    Some(code) => handle.extended_data(channel, code, chunk).await.map_err(|_| ()),
-                };
-                if sent.is_err() {
-                    break;
-                }
-            }
-        }
     }
 }
 
@@ -146,47 +120,68 @@ impl GitHandler {
             bail!("unsupported command");
         };
         let service = Service::from_ssh_verb(verb).with_context(|| format!("unsupported command {verb:?}"))?;
-        let (repo_name, repo_path) = self
+        let repo_name = self
             .inner
-            .repos
+            .storage
             .resolve(repo_ref)
             .await
             .with_context(|| format!("repository {repo_ref:?} not found"))?;
         if !service.allow(self.inner.auth.as_ref(), &repo_name) {
             bail!("forbidden");
         }
-        let repo_path_str = repo_path.to_string_lossy().to_string();
 
-        let mut child = gitcmd::spawn_piped(None, &[service.git_arg(), &repo_path_str], &[])?;
-
-        let mut stdin = child.stdin.take().expect("piped stdin");
-        let stdout = child.stdout.take().expect("piped stdout");
-        let stderr = child.stderr.take().expect("piped stderr");
+        // git's SSH-driven protocol is interactive (the server writes a
+        // ref advertisement before reading any stdin, both directions stay
+        // live at once) — that doesn't fit HTTP/1.1 request/response, so
+        // this goes over a raw TCP relay instead of the HTTP API. See
+        // git_exec_tcp for why.
+        let stream = self.inner.storage.connect_git_exec(&repo_name, service).await?;
+        let (mut read_half, write_half) = stream.into_split();
 
         let (tx, mut rx) = mpsc::unbounded_channel::<Bytes>();
         self.stdins.lock().await.insert(channel, tx);
         let stdins = self.stdins.clone();
 
         tokio::spawn(async move {
-            let stdin_task = tokio::spawn(async move {
+            let write_task = tokio::spawn(async move {
+                let mut write_half = write_half;
                 while let Some(chunk) = rx.recv().await {
-                    if stdin.write_all(&chunk).await.is_err() {
+                    if write_half.write_all(&chunk).await.is_err() {
                         break;
                     }
                 }
+                // Half-close so the storage tier sees EOF on its read side
+                // once the SSH client is done sending, and can close the
+                // subprocess's stdin in turn.
+                let _ = write_half.shutdown().await;
             });
 
-            let stdout_task = tokio::spawn(pump_to_channel(stdout, channel, handle.clone(), None));
-            let stderr_task = tokio::spawn(pump_to_channel(stderr, channel, handle.clone(), Some(1)));
-
-            let status = child.wait().await;
-            let _ = stdout_task.await;
-            let _ = stderr_task.await;
-            stdin_task.abort();
+            let mut buf = [0u8; 32 * 1024];
+            let mut ok = true;
+            loop {
+                match read_half.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if handle.data(channel, Bytes::copy_from_slice(&buf[..n])).await.is_err() {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            write_task.abort();
             stdins.lock().await.remove(&channel);
 
-            let code = status.ok().and_then(|s| s.code()).unwrap_or(1) as u32;
-            let _ = handle.exit_status_request(channel, code).await;
+            // The exact git subprocess exit code doesn't cross the proxy
+            // hop; this reports whether the relay itself succeeded,
+            // matching how the HTTP transport has never surfaced git's
+            // literal exit code to its client either — it only logs
+            // failures server-side.
+            let _ = handle.exit_status_request(channel, if ok { 0 } else { 1 }).await;
             let _ = handle.eof(channel).await;
             let _ = handle.close(channel).await;
         });
@@ -196,7 +191,7 @@ impl GitHandler {
 }
 
 /// Starts the SSH server and blocks.
-pub async fn serve(repos: Arc<Store>, auth: Arc<dyn Authorizer>, addr: SocketAddr, host_key_path: PathBuf) -> Result<()> {
+pub async fn serve(storage: Arc<StorageClient>, auth: Arc<dyn Authorizer>, addr: SocketAddr, host_key_path: PathBuf) -> Result<()> {
     let key = load_or_create_host_key(&host_key_path)?;
     let config = Arc::new(server::Config {
         keys: vec![key],
@@ -204,7 +199,7 @@ pub async fn serve(repos: Arc<Store>, auth: Arc<dyn Authorizer>, addr: SocketAdd
     });
 
     let mut handler = GitHandler {
-        inner: Arc::new(Inner { repos, auth }),
+        inner: Arc::new(Inner { storage, auth }),
         stdins: Arc::new(Mutex::new(HashMap::new())),
     };
 

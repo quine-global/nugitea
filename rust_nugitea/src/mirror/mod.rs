@@ -1,7 +1,9 @@
 //! Implements pull/push mirroring: periodically running `git fetch --prune
 //! --tags <remote>` (pull) or `git push --mirror -f <remote>` (push)
 //! against a remote configured via `git remote add --mirror=fetch|push`,
-//! mirroring services/mirror/mirror_{pull,push}.go.
+//! mirroring services/mirror/mirror_{pull,push}.go. Runs on the app tier;
+//! the actual git commands are proxied to the storage tier over
+//! `StorageClient`, same as httpgit/sshgit.
 
 mod pull;
 mod push;
@@ -15,8 +17,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Result};
 
-use crate::gitcmd;
-use crate::repo::Store as RepoStore;
+use crate::storage_client::StorageClient;
 
 /// The git remote name nugitea uses for every configured mirror; each repo
 /// has at most one mirror per direction.
@@ -28,15 +29,14 @@ const REMOTE_NAME: &str = "mirror";
 /// shared setup, differing only in which `--mirror=` flag and Direction
 /// apply.
 async fn configure(
-    repos: &RepoStore,
+    storage: &StorageClient,
     mirrors: &Store,
     repo_name: &str,
     remote_url: &str,
     interval: Duration,
     direction: Direction,
 ) -> Result<()> {
-    let repo_path = repos.path(repo_name)?;
-    if !repos.exists(repo_name).await {
+    if !storage.exists(repo_name).await {
         bail!("repo {repo_name:?} does not exist");
     }
 
@@ -46,9 +46,11 @@ async fn configure(
     };
 
     // Ignore the error: fine if no remote existed yet.
-    let _ = gitcmd::run(&repo_path, &["remote", "remove", REMOTE_NAME]).await;
+    let _ = storage.run_git(repo_name, &["remote", "remove", REMOTE_NAME]).await;
 
-    gitcmd::run(&repo_path, &["remote", "add", mirror_flag, REMOTE_NAME, remote_url]).await?;
+    storage
+        .run_git(repo_name, &["remote", "add", mirror_flag, REMOTE_NAME, remote_url])
+        .await?;
 
     mirrors
         .add(Entry {
@@ -61,10 +63,10 @@ async fn configure(
         .await
 }
 
-pub async fn add_pull(repos: &RepoStore, mirrors: &Store, repo_name: &str, remote_url: &str, interval: Duration) -> Result<()> {
-    configure(repos, mirrors, repo_name, remote_url, interval, Direction::Pull).await
+pub async fn add_pull(storage: &StorageClient, mirrors: &Store, repo_name: &str, remote_url: &str, interval: Duration) -> Result<()> {
+    configure(storage, mirrors, repo_name, remote_url, interval, Direction::Pull).await
 }
 
-pub async fn add_push(repos: &RepoStore, mirrors: &Store, repo_name: &str, remote_url: &str, interval: Duration) -> Result<()> {
-    configure(repos, mirrors, repo_name, remote_url, interval, Direction::Push).await
+pub async fn add_push(storage: &StorageClient, mirrors: &Store, repo_name: &str, remote_url: &str, interval: Duration) -> Result<()> {
+    configure(storage, mirrors, repo_name, remote_url, interval, Direction::Push).await
 }

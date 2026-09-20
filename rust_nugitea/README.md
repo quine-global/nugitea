@@ -1,42 +1,93 @@
 # rust_nugitea
 
 A tokio/Rust rewrite of the sibling Go `nugitea` implementation, one
-directory up. Same scope, same behavior, same design: no users, no auth, no
-web UI — smart-HTTP and SSH clone/push against bare repos, plus periodic
-pull/push mirroring, all implemented by shelling out to `git`.
+directory up — but split into two tiers the way GitLab splits the Rails app
+from Gitaly, instead of the single-process design Gitea (and the Go
+version) use. That split is the point: it's what lets the app tier scale
+out horizontally without needing shared/replicated filesystem storage.
 
-- **HTTP** (`src/httpgit.rs`): `axum` router streaming request/response
-  bodies directly into/out of `git upload-pack`/`receive-pack
-  --stateless-rpc` subprocesses.
-- **SSH** (`src/sshgit.rs`): `russh` server execing the same git subcommands
-  directly against the session, with client stdin forwarded via an
-  `mpsc` channel and subprocess stdout/stderr streamed back via
-  `russh::server::Handle`.
-- **Hooks** (`src/repo.rs`): same delegator-script approach as the Go
-  version — `hooks/{pre-receive,update,post-receive}` call back into
-  `nugitea hook <name>`, currently a no-op stub.
-- **Mirrors** (`src/mirror/`): a `tokio::time::interval` scheduler runs
-  `git fetch --prune --tags` (pull) / `git push --mirror -f` (push) against
-  remotes configured via `git remote add --mirror=fetch|push`.
-- **Auth** (`src/auth.rs`): an `Authorizer` trait defaulting to `AllowAll`,
-  the same extension seam as the Go version.
+```
+git client --HTTP/SSH--> [nugitea: app tier]  --internal API-->  [nugitea-storaged: storage tier]
+                           httpgit, sshgit,                         owns repo-root disk,
+                           mirror scheduler,                        runs git subprocesses,
+                           Authorizer (auth seam)                   installs hooks
+```
+
+The app tier never touches a local git path or subprocess — it only knows
+repo *names* and proxies git protocol bytes to the storage tier. The
+storage tier trusts its caller (no auth of its own), the same way Gitaly
+trusts the Rails app tier; `Authorizer` checks happen once, at the app
+tier, before a request is ever proxied. Still no users, no login, no web
+UI — just clone, push, and mirror.
+
+Two binaries, one crate (`src/lib.rs` + `src/bin/*.rs`), always run
+together — there's no embedded single-process mode:
+
+- **`nugitea` (app tier)**: `httpgit.rs` (smart-HTTP) and `sshgit.rs` (SSH)
+  are thin reverse proxies — validate the repo name, check `Authorizer`,
+  forward to the storage tier. The mirror scheduler (`mirror/`) lives here
+  too; `mirrors.json` is app-tier state (schedule bookkeeping, not git
+  data), while the actual `git fetch`/`git push --mirror` calls are proxied
+  through `storage_client.rs`.
+- **`nugitea-storaged` (storage tier)**: owns the repo-root disk
+  (`storage.rs`), installs hooks, and exposes two internal listeners:
+  - an HTTP API (`storage_server.rs`) for everything that's naturally
+    request-then-response — ref advertisement, the HTTP transport's
+    `--stateless-rpc` upload-pack/receive-pack, repo create/list/exists,
+    and the generic `run_git` used by mirror sync.
+  - a raw TCP relay (`git_exec_tcp.rs`) just for the SSH transport's
+    interactive git protocol. SSH-driven `git upload-pack`/`receive-pack`
+    write a ref advertisement to stdout *before* reading anything from
+    stdin, with both directions live simultaneously — a duplex pattern
+    HTTP/1.1 request/response framing doesn't reliably support. A plain
+    TCP socket does, the same shape as talking to a local subprocess's
+    pipes, just across a network hop.
+
+`names.rs` holds the one shared, pure (no I/O) repo-name validation and
+wire-form parsing used by both tiers.
 
 ## Usage
 
-Identical CLI surface to the Go binary:
+Always run both processes:
 
 ```sh
 cargo build --release
-./target/release/nugitea serve --http :3080 --ssh :2222 --repo-root ./data
 
-./target/release/nugitea repo create demo
+# storage tier — owns the disk
+./target/release/nugitea-storaged serve --http 127.0.0.1:9080 --tcp 127.0.0.1:9081 --repo-root ./data
+
+# app tier — speaks git to the outside world
+./target/release/nugitea serve --http :3080 --ssh :2222 \
+    --storage http://127.0.0.1:9080 --storage-tcp 127.0.0.1:9081 --state-dir ./state
+
+./target/release/nugitea repo create demo --storage http://127.0.0.1:9080
 git clone http://localhost:3080/demo.git
 git clone ssh://localhost:2222/demo.git
 
-./target/release/nugitea mirror add-pull --interval 5m demo https://example.com/some/repo.git
-./target/release/nugitea mirror add-push --interval 5m demo git@example.com:backup/demo.git
+./target/release/nugitea mirror add-pull --interval 5m --storage http://127.0.0.1:9080 \
+    --state-dir ./state demo https://example.com/some/repo.git
+./target/release/nugitea mirror add-push --interval 5m --storage http://127.0.0.1:9080 \
+    --state-dir ./state demo git@example.com:backup/demo.git
 ```
 
-`NUGITEA_REPO_ROOT` sets the repo root for the `repo`/`mirror` subcommands,
-same as the Go version. Durations accept a single `s`/`m`/`h` suffix (e.g.
-`30s`, `5m`, `2h`) — a deliberately smaller subset of Go's duration syntax.
+Env var equivalents: `NUGITEA_STORAGE` / `NUGITEA_STORAGE_TCP` (app tier's
+`--storage`/`--storage-tcp`), `NUGITEA_STATE_DIR` (app tier's
+`--state-dir`), `NUGITEA_REPO_ROOT` (storage tier's `repo`/`hook`
+subcommands). `nugitea-storaged repo create/list` also works directly on
+the storage node, bypassing the HTTP API, for operators logged in there.
+Durations accept a single `s`/`m`/`h` suffix (e.g. `30s`, `5m`, `2h`) — a
+deliberately smaller subset of Go's duration syntax.
+
+## Known simplifications from the single-process version
+
+- The SSH transport no longer forwards the git subprocess's raw OS-level
+  stderr to the client as extended data — `remote: ...` messages during
+  push/hooks travel through git's own sideband multiplexing *inside*
+  stdout, which is unaffected; only git's own rare fatal-error stderr
+  output would be missed. This also makes SSH consistent with HTTP, which
+  never forwarded that channel either.
+- The exact git subprocess exit code doesn't cross the proxy hop. SSH now
+  reports exit status 0 on a successful proxy round-trip, 1 on failure —
+  approximating "did the request go through," matching how HTTP has never
+  surfaced git's literal exit code to its client, only logged it
+  server-side.

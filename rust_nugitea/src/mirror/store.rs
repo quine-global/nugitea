@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -43,12 +43,14 @@ pub struct Store {
 }
 
 impl Store {
-    /// Returns a Store backed by mirrors.json under root.
-    pub fn new(root: &std::path::Path) -> Self {
-        Store {
+    /// Returns a Store backed by mirrors.json under root, creating root if
+    /// it doesn't already exist.
+    pub fn new(root: &std::path::Path) -> Result<Self> {
+        std::fs::create_dir_all(root).with_context(|| format!("create state dir {root:?}"))?;
+        Ok(Store {
             path: root.join("mirrors.json"),
             lock: Mutex::new(()),
-        }
+        })
     }
 
     async fn load(&self) -> Result<Vec<Entry>> {

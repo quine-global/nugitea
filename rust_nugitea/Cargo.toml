@@ -3,9 +3,9 @@ name = "rust_nugitea"
 version = "0.1.0"
 edition = "2021"
 
-[[bin]]
-name = "nugitea"
-path = "src/main.rs"
+[lib]
+name = "rust_nugitea"
+path = "src/lib.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -21,3 +21,4 @@ rand = "0.10"
 anyhow = "1"
 async-compression = { version = "0.4", features = ["tokio", "gzip"] }
 shlex = "1"
+reqwest = { version = "0.13", default-features = false, features = ["stream", "json", "query"] }

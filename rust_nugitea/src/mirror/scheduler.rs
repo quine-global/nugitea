@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use tokio::sync::Mutex;
 
-use crate::repo::Store as RepoStore;
+use crate::storage_client::StorageClient;
 
 use super::pull::sync_pull;
 use super::push::sync_push;
@@ -15,15 +15,15 @@ const TICK_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Periodically syncs configured mirrors whose interval has elapsed.
 pub struct Scheduler {
-    repos: Arc<RepoStore>,
+    storage: Arc<StorageClient>,
     mirrors: Arc<MirrorStore>,
     locks: StdMutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl Scheduler {
-    pub fn new(repos: Arc<RepoStore>, mirrors: Arc<MirrorStore>) -> Arc<Self> {
+    pub fn new(storage: Arc<StorageClient>, mirrors: Arc<MirrorStore>) -> Arc<Self> {
         Arc::new(Scheduler {
-            repos,
+            storage,
             mirrors,
             locks: StdMutex::new(HashMap::new()),
         })
@@ -64,8 +64,8 @@ impl Scheduler {
         };
 
         let result = match entry.direction {
-            Direction::Pull => sync_pull(&self.repos, &entry).await,
-            Direction::Push => sync_push(&self.repos, &entry).await,
+            Direction::Pull => sync_pull(&self.storage, &entry).await,
+            Direction::Push => sync_push(&self.storage, &entry).await,
         };
         if let Err(e) = result {
             eprintln!("mirror sync {:?} {}: {e}", entry.direction, entry.repo);
