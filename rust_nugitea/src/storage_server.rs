@@ -269,11 +269,11 @@ async fn blob(
         return StatusCode::NOT_FOUND.into_response();
     };
     match tree::read_blob(&repo_path, &git_ref, &path).await {
-        Ok(bytes) => match String::from_utf8(bytes) {
+        Ok(blob) => match String::from_utf8(blob.content) {
             Ok(content) if !content.contains('\0') => {
-                Json(tree::BlobContent { content, binary: false }).into_response()
+                Json(tree::BlobContent { content, binary: false, sha: blob.sha }).into_response()
             }
-            _ => Json(tree::BlobContent { content: String::new(), binary: true }).into_response(),
+            _ => Json(tree::BlobContent { content: String::new(), binary: true, sha: blob.sha }).into_response(),
         },
         Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
     }

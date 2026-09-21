@@ -48,6 +48,21 @@ services:
     depends_on:
       - storaged
 
+  web:
+    build: ./web
+    environment:
+      # Server-side (SSR) fetches happen container-to-container, over the
+      # compose-internal network.
+      NUXT_GRAPHQL_URL: http://app:3080/graphql
+      # Browser-side (post-hydration) fetches happen from the user's own
+      # machine, so this must be an address the host can reach — the app
+      # tier's published port, not the internal service name.
+      NUXT_PUBLIC_GRAPHQL_URL: http://localhost:3080/graphql
+    ports:
+      - "3000:3000"
+    depends_on:
+      - app
+
 volumes:
   nugitea-data:
   nugitea-state:

@@ -22,5 +22,6 @@ anyhow = "1"
 async-compression = { version = "0.4", features = ["tokio", "gzip"] }
 shlex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["stream", "json", "query"] }
-leptos = { version = "0.8", features = ["ssr", "islands"] }
-search_island = { path = "search_island", features = ["ssr"] }
+async-graphql = "7"
+async-graphql-axum = "7"
+tower-http = { version = "0.6", features = ["cors"] }

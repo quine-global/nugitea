@@ -35,6 +35,14 @@ pub struct TreeEntry {
 pub struct BlobContent {
     pub content: String,
     pub binary: bool,
+    pub sha: String,
+}
+
+/// A blob's object id alongside its raw content, so callers needing the
+/// oid (the GraphQL `Blob.oid` field) don't need a second subprocess call.
+pub struct BlobData {
+    pub sha: String,
+    pub content: Vec<u8>,
 }
 
 /// Rejects a git ref or path starting with `-`. Subprocess args aren't
@@ -84,14 +92,19 @@ pub async fn list_tree(repo_path: &Path, git_ref: &str, path: &str) -> Result<Ve
     Ok(entries)
 }
 
-/// Reads the raw content of the blob at `git_ref:path`.
-pub async fn read_blob(repo_path: &Path, git_ref: &str, path: &str) -> Result<Vec<u8>> {
+/// Reads the raw content of the blob at `git_ref:path`, along with its
+/// object id.
+pub async fn read_blob(repo_path: &Path, git_ref: &str, path: &str) -> Result<BlobData> {
     check_no_leading_dash(git_ref, "ref")?;
     check_no_leading_dash(path, "path")?;
     if path.is_empty() {
         bail!("empty path");
     }
-    gitcmd::run_captured(repo_path, &["show", &format!("{git_ref}:{path}")]).await
+    let treeish = format!("{git_ref}:{path}");
+    let sha = gitcmd::run_captured(repo_path, &["rev-parse", &treeish]).await?;
+    let sha = String::from_utf8_lossy(&sha).trim().to_string();
+    let content = gitcmd::run_captured(repo_path, &["show", &treeish]).await?;
+    Ok(BlobData { sha, content })
 }
 
 /// Lists every blob path in `git_ref`'s tree, recursively — the full file
