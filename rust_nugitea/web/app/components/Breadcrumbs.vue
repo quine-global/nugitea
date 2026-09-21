@@ -6,7 +6,10 @@ const props = defineProps<{
 }>()
 
 const crumbs = computed(() => {
-  const list = [{ label: props.repo, href: `/${props.repo}/tree/${props.gitRef}` }]
+  const list = [
+    { label: 'repos', href: '/repos' },
+    { label: props.repo, href: `/${props.repo}/tree/${props.gitRef}` },
+  ]
   let acc = ''
   if (props.path) {
     for (const seg of props.path.split('/')) {

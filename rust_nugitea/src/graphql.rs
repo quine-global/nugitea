@@ -16,7 +16,8 @@
 //! `Authorizer::allow_pull` once and returns `null` for anything not
 //! allowed or not found, matching how GitHub itself returns `null` for a
 //! repo you can't see rather than a different error shape — resolvers
-//! below it don't need to re-check.
+//! below it don't need to re-check. `Query.repositories` (the `/repos`
+//! listing page's source) applies the same `allow_pull` filter per name.
 
 use async_graphql::{http::GraphiQLSource, Context, EmptyMutation, EmptySubscription, Error, Interface, Object, Result, Schema, SimpleObject};
 use async_graphql_axum::GraphQL;
@@ -70,6 +71,14 @@ impl Query {
             return Ok(None);
         }
         Ok(Some(Repository { name }))
+    }
+
+    async fn repositories(&self, ctx: &Context<'_>) -> Result<Vec<Repository>> {
+        let state = ctx.data::<AppState>()?;
+        let mut names = state.storage.list().await.map_err(gql_err)?;
+        names.retain(|name| state.auth.allow_pull(name));
+        names.sort();
+        Ok(names.into_iter().map(|name| Repository { name }).collect())
     }
 }
 
