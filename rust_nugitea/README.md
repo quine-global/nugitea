@@ -110,6 +110,18 @@ git clone ssh://localhost:2222/demo.git
 open http://localhost:3000/demo        # or just visit it in a browser
 ```
 
+There are no fixtures baked into the image — a fresh instance starts with
+zero repos and an empty `/repos` page. `scripts/seed-fixtures.sh` creates
+two small demo repos (`foobar`, `barbaz`) the same way a real client
+would — `nugitea repo create` followed by an actual `git commit`/push, not
+a shortcut that writes to the storage tier's disk directly — and is safe
+to re-run (it skips repos that already exist):
+
+```sh
+scripts/seed-fixtures.sh http://localhost:3080 http://localhost:9080
+open http://localhost:3000/repos
+```
+
 ### Building and running directly with cargo + npm
 
 ```sh
