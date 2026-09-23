@@ -30,12 +30,24 @@ async function loadFiles() {
 async function openAndFocus() {
   open.value = true
   await nextTick()
-  inputEl.value?.focus()
+  // nextTick only waits for Vue's own render flush (a microtask) — it
+  // doesn't guarantee the browser has finished a style/layout pass, so
+  // the input can still compute as `display:none` at this point. Chrome
+  // tolerates focusing it anyway; Firefox silently no-ops the focus()
+  // call instead (the exact same class of bug the old Leptos version hit
+  // here, fixed the same way: defer one more tick, to after layout).
+  requestAnimationFrame(() => inputEl.value?.focus())
   if (!files.value.length) {
     await loadFiles()
   }
 }
 
+// Firefox's built-in Quick Find also binds "/" — it's a browser-chrome
+// command, not a page-level default action, so calling preventDefault()
+// on `keydown` alone doesn't reliably suppress it in every Firefox
+// version. Capturing the event (running before it reaches other
+// listeners) and preventing default on both `keydown` and `keypress`
+// covers the versions that hook either one.
 function onKeydown(e: KeyboardEvent) {
   if (e.key === '/' && !open.value) {
     e.preventDefault()
@@ -45,8 +57,20 @@ function onKeydown(e: KeyboardEvent) {
   }
 }
 
-onMounted(() => window.addEventListener('keydown', onKeydown))
-onUnmounted(() => window.removeEventListener('keydown', onKeydown))
+function onKeypress(e: KeyboardEvent) {
+  if (e.key === '/' && !open.value) {
+    e.preventDefault()
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', onKeydown, { capture: true })
+  window.addEventListener('keypress', onKeypress, { capture: true })
+})
+onUnmounted(() => {
+  window.removeEventListener('keydown', onKeydown, { capture: true })
+  window.removeEventListener('keypress', onKeypress, { capture: true })
+})
 
 const results = computed(() => {
   const q = query.value.toLowerCase()
