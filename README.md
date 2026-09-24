@@ -1,5 +1,7 @@
 # nugitea
 
+WORK IN PROGRESS
+
 A very very minimal Gitea. No users, no roles, no login, no web UI — just a
 server that can clone, push, and mirror git repos, implemented by shelling
 out to `git` the same way Gitea itself does (verified against Gitea's actual
