@@ -9,6 +9,7 @@
 //! that API — see its README for why, and the sibling Go implementation
 //! for the original single-process design this was split from.
 
+pub mod accounts;
 pub mod auth;
 pub mod git_exec_tcp;
 pub mod gitcmd;

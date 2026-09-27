@@ -72,6 +72,12 @@ single-process mode:
 `names.rs` holds the one shared, pure (no I/O) repo-name validation and
 wire-form parsing used by both Rust tiers.
 
+`accounts.rs` models users, orgs (optionally nested, GitLab-style),
+teams, enterprises, and role grants — the common shape of how Gitea,
+GitHub, and GitLab arrange them (see its doc comment for the
+comparison). It's models only for now: repos are still a flat namespace
+on the storage tier, and nothing consults it yet.
+
 ## Running it: three processes, always
 
 `nugitea-storaged` (owns the disk), `nugitea` (speaks git + serves
