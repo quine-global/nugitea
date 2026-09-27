@@ -1,5 +1,6 @@
 //! The app tier's git smart-HTTP endpoint. This is a thin reverse proxy —
-//! it validates the repo name, checks `Authorizer`, and forwards the
+//! it resolves the repo path against the accounts directory, checks
+//! `Authorizer`, and forwards the
 //! request to the storage tier's internal API (`storage_server`), which is
 //! where the actual git subprocess and local disk access now live.
 
@@ -11,10 +12,11 @@ use axum::{
     extract::{Path, Query, Request, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::get,
     Router,
 };
 
+use crate::accounts;
 use crate::auth::Authorizer;
 use crate::service::Service;
 use crate::storage_client::StorageClient;
@@ -23,22 +25,56 @@ use crate::storage_client::StorageClient;
 pub struct AppState {
     pub storage: Arc<StorageClient>,
     pub auth: Arc<dyn Authorizer>,
+    pub accounts: Arc<accounts::Store>,
+}
+
+impl AppState {
+    /// Resolves a wire-form repo path (`acme/platform/api.git`) to the
+    /// canonical path of a repo that exists, or None.
+    pub async fn resolve(&self, raw: &str) -> Option<String> {
+        let dir = match self.accounts.load().await {
+            Ok(dir) => dir,
+            Err(e) => {
+                eprintln!("load accounts: {e}");
+                return None;
+            }
+        };
+        self.storage.resolve(&dir, raw).await
+    }
 }
 
 /// Serves the smart-HTTP git protocol under paths of the form
-/// /{repo}.git/info/refs, /{repo}.git/git-upload-pack,
-/// /{repo}.git/git-receive-pack.
+/// /{owner path}/{repo}.git/info/refs, .../git-upload-pack, and
+/// .../git-receive-pack. The owner path can be any depth (nested orgs),
+/// and axum only allows a wildcard as the last segment, so these are one
+/// catch-all per method that splits off the fixed suffix itself. More
+/// specific routes merged alongside (e.g. `/graphql`) still win.
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/{repo}/info/refs", get(info_refs))
-        .route("/{repo}/git-upload-pack", post(upload_pack))
-        .route("/{repo}/git-receive-pack", post(receive_pack))
+        .route("/{*path}", get(get_git).post(post_git))
         .with_state(state)
+}
+
+async fn get_git(state: State<AppState>, Path(path): Path<String>, query: Query<HashMap<String, String>>) -> Response {
+    match path.strip_suffix("/info/refs") {
+        Some(repo_git) => info_refs(state, repo_git, query).await,
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn post_git(state: State<AppState>, Path(path): Path<String>, headers: HeaderMap, req: Request) -> Response {
+    if let Some(repo_git) = path.strip_suffix("/git-upload-pack") {
+        service_handler(state, repo_git, headers, req, Service::UploadPack).await
+    } else if let Some(repo_git) = path.strip_suffix("/git-receive-pack") {
+        service_handler(state, repo_git, headers, req, Service::ReceivePack).await
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
 }
 
 async fn info_refs(
     State(state): State<AppState>,
-    Path(repo_git): Path<String>,
+    repo_git: &str,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let Some(service) = params
@@ -52,7 +88,7 @@ async fn info_refs(
         )
             .into_response();
     };
-    let Some(repo_name) = state.storage.resolve(&repo_git).await else {
+    let Some(repo_name) = state.resolve(repo_git).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
     if !service.allow(state.auth.as_ref(), &repo_name) {
@@ -77,22 +113,14 @@ async fn info_refs(
     }
 }
 
-async fn upload_pack(state: State<AppState>, path: Path<String>, headers: HeaderMap, req: Request) -> Response {
-    service_handler(state, path, headers, req, Service::UploadPack).await
-}
-
-async fn receive_pack(state: State<AppState>, path: Path<String>, headers: HeaderMap, req: Request) -> Response {
-    service_handler(state, path, headers, req, Service::ReceivePack).await
-}
-
 async fn service_handler(
     State(state): State<AppState>,
-    Path(repo_git): Path<String>,
+    repo_git: &str,
     headers: HeaderMap,
     req: Request,
     service: Service,
 ) -> Response {
-    let Some(repo_name) = state.storage.resolve(&repo_git).await else {
+    let Some(repo_name) = state.resolve(repo_git).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
     if !service.allow(state.auth.as_ref(), &repo_name) {

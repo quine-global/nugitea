@@ -40,6 +40,12 @@ services:
       - /state
       - --ssh-host-key
       - /state/ssh_host_ed25519
+    environment:
+      # For admin commands run via `docker compose exec app nugitea ...`
+      # (user/org/repo create), so they write the same accounts.json and
+      # reach the same storage tier as `serve` without extra flags.
+      NUGITEA_STATE_DIR: /state
+      NUGITEA_STORAGE: http://storaged:9080
     volumes:
       - nugitea-state:/state
     ports:

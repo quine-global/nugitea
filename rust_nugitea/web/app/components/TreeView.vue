@@ -1,10 +1,12 @@
 <script setup lang="ts">
-const route = useRoute()
-const repo = computed(() => route.params.repo as string)
-const segments = computed(() => route.params.path as string[])
-const gitRef = computed(() => segments.value[0])
-const path = computed(() => segments.value.slice(1).join('/'))
-const expression = computed(() => (path.value ? `${gitRef.value}:${path.value}` : gitRef.value))
+const props = defineProps<{
+  /** `nameWithOwner`, e.g. `acme/platform/api`. */
+  repo: string
+  gitRef: string
+  path: string
+}>()
+
+const expression = computed(() => (props.path ? `${props.gitRef}:${props.path}` : props.gitRef))
 
 interface TreeEntry {
   name: string
@@ -17,20 +19,20 @@ interface TreeData {
 }
 
 const { data } = await useAsyncData(
-  () => `tree-${repo.value}-${expression.value}`,
+  () => `tree-${props.repo}-${expression.value}`,
   () =>
     graphqlRequest<TreeData>(
-      `query($name: String!, $expr: String!) {
-        repository(name: $name) {
+      `query($owner: String!, $name: String!, $expr: String!) {
+        repository(owner: $owner, name: $name) {
           object(expression: $expr) {
             __typename
             ... on Tree { entries { name type } }
           }
         }
       }`,
-      { name: repo.value, expr: expression.value }
+      { ...splitRepo(props.repo), expr: expression.value }
     ),
-  { watch: [expression] }
+  { watch: [() => props.repo, expression] }
 )
 
 const entries = computed(() => {
@@ -43,15 +45,15 @@ const entries = computed(() => {
 })
 
 function childHref(entry: TreeEntry) {
-  const childPath = path.value ? `${path.value}/${entry.name}` : entry.name
-  return `/${repo.value}/${entry.type === 'tree' ? 'tree' : 'blob'}/${gitRef.value}/${childPath}`
+  const childPath = props.path ? `${props.path}/${entry.name}` : entry.name
+  return `/${props.repo}/${entry.type === 'tree' ? 'tree' : 'blob'}/${props.gitRef}/${childPath}`
 }
 </script>
 
 <template>
   <div class="container">
     <h2>{{ repo }}</h2>
-    <Breadcrumbs :repo="repo" :git-ref="gitRef" :path="path" />
+    <Breadcrumbs :owner="splitRepo(repo).owner" :repo="splitRepo(repo).name" :git-ref="gitRef" :path="path" />
     <SearchBox :repo="repo" :git-ref="gitRef" />
     <p v-if="!data?.repository?.object">Not found.</p>
     <p v-else-if="!entries.length"><em>(empty directory)</em></p>

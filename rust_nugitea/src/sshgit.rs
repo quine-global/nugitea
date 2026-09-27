@@ -1,7 +1,8 @@
 //! The app tier's SSH transport for git clone/push. Like `httpgit`, this is
-//! a thin proxy: it validates the repo name, checks `Authorizer`, and
-//! forwards the SSH session's stdin/stdout to the storage tier's raw
-//! git-exec TCP relay (`git_exec_tcp`) instead of execing git locally.
+//! a thin proxy: it resolves the repo path (via `AppState::resolve`,
+//! shared with `httpgit`), checks `Authorizer`, and forwards the SSH
+//! session's stdin/stdout to the storage tier's raw git-exec TCP relay
+//! (`git_exec_tcp`) instead of execing git locally.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -16,13 +17,11 @@ use russh::{Channel, ChannelId};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex};
 
-use crate::auth::Authorizer;
+use crate::httpgit::AppState;
 use crate::service::Service;
-use crate::storage_client::StorageClient;
 
 struct Inner {
-    storage: Arc<StorageClient>,
-    auth: Arc<dyn Authorizer>,
+    state: AppState,
 }
 
 /// Handler is cloned fresh per incoming connection by `new_client`, so
@@ -120,13 +119,12 @@ impl GitHandler {
             bail!("unsupported command");
         };
         let service = Service::from_ssh_verb(verb).with_context(|| format!("unsupported command {verb:?}"))?;
-        let repo_name = self
-            .inner
-            .storage
+        let state = &self.inner.state;
+        let repo_name = state
             .resolve(repo_ref)
             .await
             .with_context(|| format!("repository {repo_ref:?} not found"))?;
-        if !service.allow(self.inner.auth.as_ref(), &repo_name) {
+        if !service.allow(state.auth.as_ref(), &repo_name) {
             bail!("forbidden");
         }
 
@@ -135,7 +133,7 @@ impl GitHandler {
         // live at once) — that doesn't fit HTTP/1.1 request/response, so
         // this goes over a raw TCP relay instead of the HTTP API. See
         // git_exec_tcp for why.
-        let stream = self.inner.storage.connect_git_exec(&repo_name, service).await?;
+        let stream = state.storage.connect_git_exec(&repo_name, service).await?;
         let (mut read_half, write_half) = stream.into_split();
 
         let (tx, mut rx) = mpsc::unbounded_channel::<Bytes>();
@@ -191,7 +189,7 @@ impl GitHandler {
 }
 
 /// Starts the SSH server and blocks.
-pub async fn serve(storage: Arc<StorageClient>, auth: Arc<dyn Authorizer>, addr: SocketAddr, host_key_path: PathBuf) -> Result<()> {
+pub async fn serve(state: AppState, addr: SocketAddr, host_key_path: PathBuf) -> Result<()> {
     let key = load_or_create_host_key(&host_key_path)?;
     let config = Arc::new(server::Config {
         keys: vec![key],
@@ -199,7 +197,7 @@ pub async fn serve(storage: Arc<StorageClient>, auth: Arc<dyn Authorizer>, addr:
     });
 
     let mut handler = GitHandler {
-        inner: Arc::new(Inner { storage, auth }),
+        inner: Arc::new(Inner { state }),
         stdins: Arc::new(Mutex::new(HashMap::new())),
     };
 

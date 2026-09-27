@@ -6,6 +6,7 @@
 // this is exactly Vue's home turf.
 
 const props = defineProps<{
+  /** `nameWithOwner`, e.g. `acme/platform/api`. */
   repo: string
   gitRef: string
 }>()
@@ -18,8 +19,10 @@ const inputEl = ref<HTMLInputElement | null>(null)
 async function loadFiles() {
   try {
     const data = await graphqlRequest<{ repository: { files: string[] } | null }>(
-      `query($name: String!, $ref: String!) { repository(name: $name) { files(ref: $ref) } }`,
-      { name: props.repo, ref: props.gitRef }
+      `query($owner: String!, $name: String!, $ref: String!) {
+        repository(owner: $owner, name: $name) { files(ref: $ref) }
+      }`,
+      { ...splitRepo(props.repo), ref: props.gitRef }
     )
     files.value = data.repository?.files ?? []
   } catch {

@@ -1,6 +1,6 @@
 //! The app tier's client for the storage tier's internal HTTP API (see
 //! `storage_server`). The app tier holds one of these instead of a local
-//! `storage::Store` — it never sees a local git path, only repo names.
+//! `storage::Store` — it never sees a local git path, only repo paths.
 
 use anyhow::{bail, Result};
 use bytes::Bytes;
@@ -8,9 +8,18 @@ use futures::Stream;
 use serde::Serialize;
 use tokio::net::TcpStream;
 
+use crate::accounts::Directory;
 use crate::names;
 use crate::service::Service;
 use crate::tree::{BlobContent, TreeEntry};
+
+/// Encodes a repo path as a single URL path segment for the storage
+/// API's `/repos/{name}` routes, which percent-decode it back. Repo paths
+/// are validated to `[A-Za-z0-9_.-/]`, so '/' is the only character that
+/// needs it.
+fn seg(name: &str) -> String {
+    name.replace('/', "%2F")
+}
 
 #[derive(Clone)]
 pub struct StorageClient {
@@ -32,11 +41,14 @@ impl StorageClient {
         format!("{}{path}", self.base_url)
     }
 
-    /// Turns a wire-form repo reference (HTTP path segment or SSH command
-    /// path) into a validated, existing repo name — the app tier's
-    /// equivalent of the old local `storage::Store::resolve`.
-    pub async fn resolve(&self, raw: &str) -> Option<String> {
-        let name = names::from_wire_form(raw)?;
+    /// Turns a wire-form repo reference (HTTP path or SSH command path)
+    /// into the canonical path of a repo that exists both in `dir` and on
+    /// the storage tier. Lookup is case-insensitive, like GitHub's; the
+    /// returned path has the directory's canonical casing, which is what
+    /// the storage tier's (case-sensitive) disk layout uses.
+    pub async fn resolve(&self, dir: &Directory, raw: &str) -> Option<String> {
+        let path = names::from_wire_form(raw)?;
+        let name = dir.repo_path(dir.resolve_repo(&path)?)?;
         if self.exists(&name).await {
             Some(name)
         } else {
@@ -46,7 +58,7 @@ impl StorageClient {
 
     pub async fn exists(&self, name: &str) -> bool {
         self.http
-            .head(self.url(&format!("/repos/{name}")))
+            .head(self.url(&format!("/repos/{}", seg(name))))
             .send()
             .await
             .map(|r| r.status().is_success())
@@ -54,7 +66,7 @@ impl StorageClient {
     }
 
     pub async fn init_bare(&self, name: &str) -> Result<()> {
-        let resp = self.http.post(self.url(&format!("/repos/{name}"))).send().await?;
+        let resp = self.http.post(self.url(&format!("/repos/{}", seg(name)))).send().await?;
         if !resp.status().is_success() {
             bail!("create repo {name:?}: {}", resp.text().await.unwrap_or_default());
         }
@@ -74,7 +86,7 @@ impl StorageClient {
         }
         let resp = self
             .http
-            .post(self.url(&format!("/repos/{name}/git")))
+            .post(self.url(&format!("/repos/{}/git", seg(name))))
             .json(&Req { args })
             .send()
             .await?;
@@ -88,7 +100,7 @@ impl StorageClient {
     pub async fn info_refs(&self, name: &str, service: Service) -> Result<Vec<u8>> {
         let resp = self
             .http
-            .get(self.url(&format!("/repos/{name}/info-refs")))
+            .get(self.url(&format!("/repos/{}/info-refs", seg(name))))
             .query(&[("service", format!("git-{}", service.git_arg()))])
             .send()
             .await?
@@ -109,7 +121,7 @@ impl StorageClient {
         content_encoding_gzip: bool,
         body: reqwest::Body,
     ) -> Result<impl Stream<Item = reqwest::Result<Bytes>>> {
-        let mut req = self.http.post(self.url(&format!("/repos/{name}/{}", service.git_arg()))).body(body);
+        let mut req = self.http.post(self.url(&format!("/repos/{}/{}", seg(name), service.git_arg()))).body(body);
         if let Some(proto) = git_protocol_header {
             req = req.header("Git-Protocol", proto);
         }
@@ -123,7 +135,7 @@ impl StorageClient {
     pub async fn branches(&self, name: &str) -> Result<Vec<String>> {
         Ok(self
             .http
-            .get(self.url(&format!("/repos/{name}/branches")))
+            .get(self.url(&format!("/repos/{}/branches", seg(name))))
             .send()
             .await?
             .error_for_status()?
@@ -136,7 +148,7 @@ impl StorageClient {
     pub async fn all_files(&self, name: &str, git_ref: &str) -> Result<Vec<String>> {
         Ok(self
             .http
-            .get(self.url(&format!("/repos/{name}/files/{git_ref}")))
+            .get(self.url(&format!("/repos/{}/files/{git_ref}", seg(name))))
             .send()
             .await?
             .error_for_status()?
@@ -148,16 +160,16 @@ impl StorageClient {
     /// root tree, when path is empty) for the file-browser UI.
     pub async fn tree(&self, name: &str, git_ref: &str, path: &str) -> Result<Vec<TreeEntry>> {
         let url = if path.is_empty() {
-            self.url(&format!("/repos/{name}/tree/{git_ref}"))
+            self.url(&format!("/repos/{}/tree/{git_ref}", seg(name)))
         } else {
-            self.url(&format!("/repos/{name}/tree/{git_ref}/{path}"))
+            self.url(&format!("/repos/{}/tree/{git_ref}/{path}", seg(name)))
         };
         Ok(self.http.get(url).send().await?.error_for_status()?.json().await?)
     }
 
     /// Reads a blob's content for the file-browser UI.
     pub async fn blob(&self, name: &str, git_ref: &str, path: &str) -> Result<BlobContent> {
-        let url = self.url(&format!("/repos/{name}/blob/{git_ref}/{path}"));
+        let url = self.url(&format!("/repos/{}/blob/{git_ref}/{path}", seg(name)));
         Ok(self.http.get(url).send().await?.error_for_status()?.json().await?)
     }
 

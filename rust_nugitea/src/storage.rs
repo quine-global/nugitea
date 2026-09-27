@@ -1,6 +1,9 @@
-//! Manages the on-disk layout of bare repositories: a flat namespace of
-//! `<root>/<name>.git` directories (no users/orgs, since nugitea has none),
-//! mirroring the bare-repo shape Gitea itself creates via `git init --bare`.
+//! Manages the on-disk layout of bare repositories: `<root>/<owner
+//! path>/<name>.git`, one directory level per owner segment (so
+//! `acme/platform/api` lives at `<root>/acme/platform/api.git`), mirroring
+//! Gitea's `<root>/<owner>/<name>.git` extended to nested orgs. The
+//! storage tier knows nothing about accounts — it just trusts that the
+//! app tier already resolved a repo path against them.
 //!
 //! This module is storage-tier only — it's the one place that ever touches
 //! local git paths. The app tier never sees a PathBuf, only repo names,
@@ -32,7 +35,7 @@ impl Store {
     /// Returns the absolute path to the bare repo directory for name
     /// (without requiring it to exist).
     pub fn path(&self, name: &str) -> Result<PathBuf> {
-        names::validate(name)?;
+        names::validate_repo_path(name)?;
         Ok(self.root.join(format!("{name}.git")))
     }
 
@@ -44,17 +47,13 @@ impl Store {
         }
     }
 
-    /// Returns the names of all repos under the root.
+    /// Returns the paths of all repos under the root. Anything that isn't
+    /// a valid repo path — e.g. a flat `<root>/<name>.git` left over from
+    /// before repos had owners — is skipped.
     pub fn list(&self) -> Result<Vec<String>> {
         let mut names = Vec::new();
-        for entry in std::fs::read_dir(&self.root)? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                if let Some(name) = entry.file_name().to_str().and_then(|s| s.strip_suffix(".git")) {
-                    names.push(name.to_string());
-                }
-            }
-        }
+        list_under(&self.root, "", &mut names)?;
+        names.retain(|n| names::validate_repo_path(n).is_ok());
         Ok(names)
     }
 
@@ -77,6 +76,23 @@ impl Store {
 
         Ok(path)
     }
+}
+
+/// Walks owner directories under dir, collecting `<prefix><name>` for
+/// each `<name>.git` found. Doesn't descend into repos themselves.
+fn list_under(dir: &Path, prefix: &str, out: &mut Vec<String>) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let Some(file_name) = entry.file_name().to_str().map(str::to_string) else { continue };
+        match file_name.strip_suffix(".git") {
+            Some(name) => out.push(format!("{prefix}{name}")),
+            None => list_under(&entry.path(), &format!("{prefix}{file_name}/"), out)?,
+        }
+    }
+    Ok(())
 }
 
 /// hook_names are the git server-side hooks nugitea installs a delegator
@@ -113,4 +129,26 @@ async fn install_hooks(repo_path: &Path, storaged_bin: &Path) -> Result<()> {
 /// generated shell script.
 fn shell_quote_single(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn nested_layout() {
+        let root = std::env::temp_dir().join(format!("nugitea-storage-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = Store::new(&root).unwrap();
+        assert_eq!(store.path("acme/platform/api").unwrap(), store.root.join("acme/platform/api.git"));
+        assert!(store.path("../x").is_err());
+        std::fs::create_dir_all(store.root.join("acme/platform/api.git")).unwrap();
+        std::fs::create_dir_all(store.root.join("alice/dotfiles.git")).unwrap();
+        std::fs::create_dir_all(store.root.join("legacy.git")).unwrap();
+        let mut names = store.list().unwrap();
+        names.sort();
+        assert_eq!(names, ["acme/platform/api", "alice/dotfiles"]);
+        assert!(store.exists("acme/platform/api").await);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

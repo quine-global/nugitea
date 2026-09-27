@@ -1,10 +1,12 @@
 <script setup lang="ts">
-const route = useRoute()
-const repo = computed(() => route.params.repo as string)
-const segments = computed(() => route.params.path as string[])
-const gitRef = computed(() => segments.value[0])
-const path = computed(() => segments.value.slice(1).join('/'))
-const expression = computed(() => `${gitRef.value}:${path.value}`)
+const props = defineProps<{
+  /** `nameWithOwner`, e.g. `acme/platform/api`. */
+  repo: string
+  gitRef: string
+  path: string
+}>()
+
+const expression = computed(() => `${props.gitRef}:${props.path}`)
 
 interface BlobData {
   repository: {
@@ -13,20 +15,20 @@ interface BlobData {
 }
 
 const { data } = await useAsyncData(
-  () => `blob-${repo.value}-${expression.value}`,
+  () => `blob-${props.repo}-${expression.value}`,
   () =>
     graphqlRequest<BlobData>(
-      `query($name: String!, $expr: String!) {
-        repository(name: $name) {
+      `query($owner: String!, $name: String!, $expr: String!) {
+        repository(owner: $owner, name: $name) {
           object(expression: $expr) {
             __typename
             ... on Blob { text isBinary }
           }
         }
       }`,
-      { name: repo.value, expr: expression.value }
+      { ...splitRepo(props.repo), expr: expression.value }
     ),
-  { watch: [expression] }
+  { watch: [() => props.repo, expression] }
 )
 
 const blob = computed(() => data.value?.repository?.object)
@@ -35,7 +37,7 @@ const blob = computed(() => data.value?.repository?.object)
 <template>
   <div class="container">
     <h2>{{ repo }}</h2>
-    <Breadcrumbs :repo="repo" :git-ref="gitRef" :path="path" />
+    <Breadcrumbs :owner="splitRepo(repo).owner" :repo="splitRepo(repo).name" :git-ref="gitRef" :path="path" />
     <SearchBox :repo="repo" :git-ref="gitRef" />
     <p v-if="!blob">Not found.</p>
     <p v-else-if="blob.isBinary"><em>binary file not shown</em></p>

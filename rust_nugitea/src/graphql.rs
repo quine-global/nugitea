@@ -1,25 +1,41 @@
-//! A GitHub-schema-flavored GraphQL API for browsing repo contents — the
-//! app tier's replacement for the old Leptos SSR pages, now that browsing
-//! UI lives in a separate Nuxt.js app (`web/`) that queries this.
+//! A GitHub-schema-compatible GraphQL API for browsing owners and repo
+//! contents, queried by the separate Nuxt.js app (`web/`).
 //!
-//! GitHub's real schema addresses tree/blob content via
-//! `repository.object(expression: "REF:PATH")`, returning a `GitObject`
-//! interface resolved with inline fragments (`... on Blob`, `... on
-//! Tree`). That maps almost exactly onto the `git_ref:path` addressing
-//! `tree::list_tree`/`read_blob` already use on the storage tier, so this
-//! reuses that shape rather than inventing a new one — same idea, but the
-//! `files(ref:)` field (a full recursive file list) isn't literal GitHub
-//! API shape; it's a pragmatic reuse of `tree::list_all_files`, kept
-//! because that's what the search feature needs.
+//! The owner side follows GitHub's schema: `repository(owner:, name:)`,
+//! `repositoryOwner(login:)` / `user(login:)` / `organization(login:)`
+//! returning the `RepositoryOwner` interface, `resource(url:)` returning
+//! the `UniformResourceLocatable` interface, and owners' `repositories`
+//! as a connection (`nodes`, `totalCount`; `first` is accepted but there's
+//! no cursor paging). A GitHub client works unchanged against single-level
+//! owners.
 //!
-//! No auth beyond the usual: `Query.repository` checks
-//! `Authorizer::allow_pull` once and returns `null` for anything not
-//! allowed or not found, matching how GitHub itself returns `null` for a
-//! repo you can't see rather than a different error shape — resolvers
-//! below it don't need to re-check. `Query.repositories` (the `/repos`
-//! listing page's source) applies the same `allow_pull` filter per name.
+//! Nested orgs are the one extension. A sub-org's `login` is its full
+//! path (`acme/platform`), so `repository(owner: "acme/platform", name:
+//! "api")` and `resource(url: "/acme/platform/api")` just work, and
+//! `Organization` gains two fields GitHub doesn't have: `parentOrganization`
+//! and `subOrganizations`. The top-level `repositories` list (the `/repos`
+//! page's source) is also nugitea-only.
+//!
+//! Contents follow GitHub's `repository.object(expression: "REF:PATH")`,
+//! returning a `GitObject` interface resolved with inline fragments (`...
+//! on Blob`, `... on Tree`) — that maps almost exactly onto the
+//! `git_ref:path` addressing `tree::list_tree`/`read_blob` already use on
+//! the storage tier. `files(ref:)` (a full recursive file list) isn't
+//! literal GitHub API shape; it's kept because that's what the search
+//! feature needs.
+//!
+//! Each query loads one snapshot of the accounts directory up front, so
+//! everything in a response is consistent with itself. Anything
+//! `Authorizer::allow_pull` rejects resolves to `null` or is left out of
+//! lists, matching how GitHub returns `null` for a repo you can't see
+//! rather than a different error shape.
 
-use async_graphql::{http::GraphiQLSource, Context, EmptyMutation, EmptySubscription, Error, Interface, Object, Result, Schema, SimpleObject};
+use std::sync::Arc;
+
+use async_graphql::{
+    http::GraphiQLSource, Context, EmptyMutation, EmptySubscription, Enum, Error, Interface, Object, Result, Schema,
+    SimpleObject, ID,
+};
 use async_graphql_axum::GraphQL;
 use axum::{
     response::{Html, IntoResponse},
@@ -28,17 +44,20 @@ use axum::{
 };
 use tower_http::cors::CorsLayer;
 
+use crate::accounts::{Directory, Id, Visibility};
+use crate::auth::Authorizer;
 use crate::httpgit::AppState;
 use crate::tree::EntryKind;
 
 type NugiteaSchema = Schema<Query, EmptyMutation, EmptySubscription>;
 
+pub fn schema(state: AppState) -> NugiteaSchema {
+    Schema::build(Query, EmptyMutation, EmptySubscription).data(state).finish()
+}
+
 pub fn router(state: AppState) -> Router {
-    let schema: NugiteaSchema = Schema::build(Query, EmptyMutation, EmptySubscription)
-        .data(state)
-        .finish();
     Router::new()
-        .route("/graphql", post_service(GraphQL::new(schema)).get(graphiql))
+        .route("/graphql", post_service(GraphQL::new(schema(state))).get(graphiql))
         .layer(CorsLayer::permissive())
 }
 
@@ -58,47 +77,293 @@ fn split_expression(expression: &str) -> (&str, &str) {
     }
 }
 
+/// Reduces a GitHub `resource(url:)` argument — a full URL or just a path
+/// — to its path segments.
+fn url_segments(url: &str) -> Vec<&str> {
+    let path = match url.split_once("://") {
+        Some((_, rest)) => rest.find('/').map_or("", |i| &rest[i..]),
+        None => url,
+    };
+    let path = path.split(['?', '#']).next().unwrap_or("");
+    path.split('/').filter(|s| !s.is_empty()).collect()
+}
+
+/// One query's view of the accounts directory, shared by every object it
+/// returns.
+struct Snapshot {
+    dir: Directory,
+    auth: Arc<dyn Authorizer>,
+}
+
+impl Snapshot {
+    async fn load(ctx: &Context<'_>) -> Result<Arc<Snapshot>> {
+        let state = ctx.data::<AppState>()?;
+        let dir = state.accounts.load().await.map_err(gql_err)?;
+        Ok(Arc::new(Snapshot { dir, auth: state.auth.clone() }))
+    }
+
+    fn repository(self: &Arc<Self>, id: Id) -> Option<Repository> {
+        let path = self.dir.repo_path(id)?;
+        if !self.auth.allow_pull(&path) {
+            return None;
+        }
+        Some(Repository { snap: self.clone(), id, path })
+    }
+
+    fn owner(self: &Arc<Self>, id: Id) -> Option<RepositoryOwner> {
+        let a = self.dir.account(id)?;
+        let snap = self.clone();
+        Some(if a.is_org() {
+            RepositoryOwner::Organization(Organization { snap, id })
+        } else {
+            RepositoryOwner::User(User { snap, id })
+        })
+    }
+
+    fn repositories(self: &Arc<Self>, repos: impl Iterator<Item = Id>, first: Option<i32>) -> RepositoryConnection {
+        let mut nodes: Vec<Repository> = repos.filter_map(|id| self.repository(id)).collect();
+        nodes.sort_by(|a, b| a.path.cmp(&b.path));
+        connection(nodes, first, |nodes, total_count| RepositoryConnection { nodes, total_count })
+    }
+}
+
+fn connection<T, C>(mut nodes: Vec<T>, first: Option<i32>, make: impl FnOnce(Vec<T>, i32) -> C) -> C {
+    let total = nodes.len() as i32;
+    if let Some(n) = first {
+        nodes.truncate(n.max(0) as usize);
+    }
+    make(nodes, total)
+}
+
 pub struct Query;
 
 #[Object]
 impl Query {
-    async fn repository(&self, ctx: &Context<'_>, name: String) -> Result<Option<Repository>> {
-        let state = ctx.data::<AppState>()?;
-        if !state.auth.allow_pull(&name) {
-            return Ok(None);
-        }
-        if !state.storage.exists(&name).await {
-            return Ok(None);
-        }
-        Ok(Some(Repository { name }))
+    async fn repository(&self, ctx: &Context<'_>, owner: String, name: String) -> Result<Option<Repository>> {
+        let snap = Snapshot::load(ctx).await?;
+        Ok(snap.dir.resolve_repo(&format!("{owner}/{name}")).and_then(|id| snap.repository(id)))
     }
 
-    async fn repositories(&self, ctx: &Context<'_>) -> Result<Vec<Repository>> {
-        let state = ctx.data::<AppState>()?;
-        let mut names = state.storage.list().await.map_err(gql_err)?;
-        names.retain(|name| state.auth.allow_pull(name));
-        names.sort();
-        Ok(names.into_iter().map(|name| Repository { name }).collect())
+    async fn repository_owner(&self, ctx: &Context<'_>, login: String) -> Result<Option<RepositoryOwner>> {
+        let snap = Snapshot::load(ctx).await?;
+        Ok(snap.dir.resolve(&login).and_then(|id| snap.owner(id)))
+    }
+
+    async fn user(&self, ctx: &Context<'_>, login: String) -> Result<Option<User>> {
+        Ok(match self.repository_owner(ctx, login).await? {
+            Some(RepositoryOwner::User(u)) => Some(u),
+            _ => None,
+        })
+    }
+
+    async fn organization(&self, ctx: &Context<'_>, login: String) -> Result<Option<Organization>> {
+        Ok(match self.repository_owner(ctx, login).await? {
+            Some(RepositoryOwner::Organization(o)) => Some(o),
+            _ => None,
+        })
+    }
+
+    /// Resolves a URL or path to the user, org, or repo it names. Walks
+    /// owner segments until one names a repo, then stops — so trailing
+    /// segments (`/tree/main/src`) still resolve to the repo, and the
+    /// caller can compare `resourcePath` to see what's left over.
+    /// Unambiguous because a sub-org and a repo can't share a name
+    /// within the same parent.
+    async fn resource(&self, ctx: &Context<'_>, url: String) -> Result<Option<UniformResourceLocatable>> {
+        let snap = Snapshot::load(ctx).await?;
+        let segs = url_segments(&url);
+        if segs.is_empty() {
+            return Ok(None);
+        }
+        for i in 0..segs.len() {
+            let prefix = segs[..=i].join("/");
+            if snap.dir.resolve(&prefix).is_some() {
+                continue;
+            }
+            return Ok(snap
+                .dir
+                .resolve_repo(&prefix)
+                .and_then(|id| snap.repository(id))
+                .map(UniformResourceLocatable::Repository));
+        }
+        let owner = snap.dir.resolve(&segs.join("/")).and_then(|id| snap.owner(id));
+        Ok(owner.map(|o| match o {
+            RepositoryOwner::User(u) => UniformResourceLocatable::User(u),
+            RepositoryOwner::Organization(o) => UniformResourceLocatable::Organization(o),
+        }))
+    }
+
+    /// Every repo, across all owners (nugitea extension).
+    async fn repositories(&self, ctx: &Context<'_>, first: Option<i32>) -> Result<RepositoryConnection> {
+        let snap = Snapshot::load(ctx).await?;
+        Ok(snap.repositories(snap.dir.repos().map(|r| r.id), first))
+    }
+}
+
+#[derive(Interface)]
+#[graphql(
+    field(name = "id", ty = "ID"),
+    field(name = "login", ty = "String"),
+    field(name = "resource_path", ty = "String"),
+    field(name = "repositories", ty = "RepositoryConnection", arg(name = "first", ty = "Option<i32>"))
+)]
+pub enum RepositoryOwner {
+    User(User),
+    Organization(Organization),
+}
+
+#[derive(Interface)]
+#[graphql(field(name = "resource_path", ty = "String"))]
+pub enum UniformResourceLocatable {
+    Repository(Repository),
+    User(User),
+    Organization(Organization),
+}
+
+#[derive(SimpleObject)]
+pub struct RepositoryConnection {
+    nodes: Vec<Repository>,
+    total_count: i32,
+}
+
+#[derive(SimpleObject)]
+pub struct OrganizationConnection {
+    nodes: Vec<Organization>,
+    total_count: i32,
+}
+
+#[derive(Enum, Copy, Clone, PartialEq, Eq)]
+pub enum RepositoryVisibility {
+    Public,
+    Internal,
+    Private,
+}
+
+impl From<Visibility> for RepositoryVisibility {
+    fn from(v: Visibility) -> Self {
+        match v {
+            Visibility::Public => RepositoryVisibility::Public,
+            Visibility::Internal => RepositoryVisibility::Internal,
+            Visibility::Private => RepositoryVisibility::Private,
+        }
+    }
+}
+
+pub struct User {
+    snap: Arc<Snapshot>,
+    id: Id,
+}
+
+#[Object]
+impl User {
+    async fn id(&self) -> ID {
+        ID(format!("U_{}", self.id))
+    }
+
+    async fn login(&self) -> String {
+        self.snap.dir.path(self.id).unwrap_or_default()
+    }
+
+    async fn resource_path(&self) -> String {
+        format!("/{}", self.snap.dir.path(self.id).unwrap_or_default())
+    }
+
+    async fn repositories(&self, first: Option<i32>) -> RepositoryConnection {
+        self.snap.repositories(self.snap.dir.repos_owned_by(self.id).map(|r| r.id), first)
+    }
+}
+
+pub struct Organization {
+    snap: Arc<Snapshot>,
+    id: Id,
+}
+
+#[Object]
+impl Organization {
+    async fn id(&self) -> ID {
+        ID(format!("O_{}", self.id))
+    }
+
+    /// The org's full path — just its slug for a top-level org, like
+    /// GitHub; `parent/child` for a sub-org.
+    async fn login(&self) -> String {
+        self.snap.dir.path(self.id).unwrap_or_default()
+    }
+
+    async fn resource_path(&self) -> String {
+        format!("/{}", self.snap.dir.path(self.id).unwrap_or_default())
+    }
+
+    async fn repositories(&self, first: Option<i32>) -> RepositoryConnection {
+        self.snap.repositories(self.snap.dir.repos_owned_by(self.id).map(|r| r.id), first)
+    }
+
+    /// nugitea extension: the org this one is nested under, if any.
+    async fn parent_organization(&self) -> Option<Organization> {
+        let parent = self.snap.dir.account(self.id)?.parent()?;
+        Some(Organization { snap: self.snap.clone(), id: parent })
+    }
+
+    /// nugitea extension: orgs nested directly under this one.
+    async fn sub_organizations(&self, first: Option<i32>) -> OrganizationConnection {
+        let mut orgs: Vec<_> = self.snap.dir.child_orgs(self.id).map(|a| (a.slug.clone(), a.id)).collect();
+        orgs.sort();
+        let nodes = orgs.into_iter().map(|(_, id)| Organization { snap: self.snap.clone(), id }).collect();
+        connection(nodes, first, |nodes, total_count| OrganizationConnection { nodes, total_count })
     }
 }
 
 pub struct Repository {
-    name: String,
+    snap: Arc<Snapshot>,
+    id: Id,
+    /// Canonical `owner[/sub-org...]/name`, which is also the storage
+    /// tier's name for it.
+    path: String,
+}
+
+impl Repository {
+    fn visibility_value(&self) -> Visibility {
+        self.snap.dir.repo(self.id).map_or(Visibility::Private, |r| r.visibility)
+    }
 }
 
 #[Object]
 impl Repository {
+    async fn id(&self) -> ID {
+        ID(format!("R_{}", self.id))
+    }
+
     async fn name(&self) -> &str {
-        &self.name
+        self.path.rsplit_once('/').map_or(&self.path, |(_, name)| name)
+    }
+
+    async fn name_with_owner(&self) -> &str {
+        &self.path
+    }
+
+    async fn owner(&self) -> Result<RepositoryOwner> {
+        let owner = self.snap.dir.repo(self.id).map(|r| r.owner);
+        owner.and_then(|o| self.snap.owner(o)).ok_or_else(|| gql_err("repository has no owner"))
+    }
+
+    async fn resource_path(&self) -> String {
+        format!("/{}", self.path)
+    }
+
+    async fn visibility(&self) -> RepositoryVisibility {
+        self.visibility_value().into()
+    }
+
+    async fn is_private(&self) -> bool {
+        self.visibility_value() == Visibility::Private
     }
 
     /// `main` if it exists, else `master`, else whichever branch sorts
-    /// first, else `null` — the same heuristic the old Leptos UI used,
-    /// since HEAD in a freshly created bare repo doesn't reliably reflect
-    /// what was actually pushed.
+    /// first, else `null` — since HEAD in a freshly created bare repo
+    /// doesn't reliably reflect what was actually pushed.
     async fn default_branch_ref(&self, ctx: &Context<'_>) -> Result<Option<Ref>> {
         let state = ctx.data::<AppState>()?;
-        let branches = state.storage.branches(&self.name).await.map_err(gql_err)?;
+        let branches = state.storage.branches(&self.path).await.map_err(gql_err)?;
         let default = branches
             .iter()
             .find(|b| b.as_str() == "main")
@@ -110,14 +375,14 @@ impl Repository {
 
     async fn refs(&self, ctx: &Context<'_>) -> Result<Vec<Ref>> {
         let state = ctx.data::<AppState>()?;
-        Ok(state.storage.branches(&self.name).await.map_err(gql_err)?.into_iter().map(|name| Ref { name }).collect())
+        Ok(state.storage.branches(&self.path).await.map_err(gql_err)?.into_iter().map(|name| Ref { name }).collect())
     }
 
     /// Full recursive file list for the search feature — see the module
     /// doc comment for why this isn't literal GitHub API shape.
     async fn files(&self, ctx: &Context<'_>, r#ref: String) -> Result<Vec<String>> {
         let state = ctx.data::<AppState>()?;
-        state.storage.all_files(&self.name, &r#ref).await.map_err(gql_err)
+        state.storage.all_files(&self.path, &r#ref).await.map_err(gql_err)
     }
 
     /// Resolves a `"ref"` or `"ref:path"` expression to a `Tree` or
@@ -130,7 +395,7 @@ impl Repository {
         let state = ctx.data::<AppState>()?;
         let (git_ref, path) = split_expression(&expression);
 
-        if let Ok(entries) = state.storage.tree(&self.name, git_ref, path).await {
+        if let Ok(entries) = state.storage.tree(&self.path, git_ref, path).await {
             let entries = entries
                 .into_iter()
                 .map(|e| TreeEntry {
@@ -151,7 +416,7 @@ impl Repository {
         if path.is_empty() {
             return Ok(None); // root of a nonexistent ref is neither a tree nor a blob
         }
-        match state.storage.blob(&self.name, git_ref, path).await {
+        match state.storage.blob(&self.path, git_ref, path).await {
             Ok(blob) => Ok(Some(GitObject::Blob(Blob {
                 oid: blob.sha,
                 is_binary: blob.binary,
@@ -195,4 +460,114 @@ pub struct Blob {
     is_binary: bool,
     text: Option<String>,
     byte_size: i32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::accounts;
+    use crate::auth::AllowAll;
+    use crate::storage_client::StorageClient;
+
+    /// A schema over a real accounts.json in a temp dir. The storage tier
+    /// isn't running, so only owner-side fields are queryable.
+    async fn schema_with(setup: impl FnOnce(&mut Directory) -> anyhow::Result<()>) -> NugiteaSchema {
+        let dir = std::env::temp_dir().join(format!("nugitea-graphql-test-{}-{}", std::process::id(), rand::random::<u64>()));
+        let accounts = Arc::new(accounts::Store::new(&dir).unwrap());
+        accounts.update(setup).await.unwrap();
+        schema(AppState {
+            storage: Arc::new(StorageClient::new("http://127.0.0.1:1".into(), "127.0.0.1:1".into())),
+            auth: Arc::new(AllowAll),
+            accounts,
+        })
+    }
+
+    async fn run(schema: &NugiteaSchema, query: &str) -> serde_json::Value {
+        let resp = schema.execute(query).await;
+        assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+        serde_json::to_value(resp.data).unwrap()
+    }
+
+    async fn fixture() -> NugiteaSchema {
+        schema_with(|d| {
+            d.add_user("alice")?;
+            d.add_repo_at("alice/dotfiles", Visibility::Private)?;
+            d.add_org_at("acme", Visibility::Public)?;
+            d.add_org_at("acme/platform", Visibility::Public)?;
+            d.add_repo_at("acme/site", Visibility::Public)?;
+            d.add_repo_at("acme/platform/api", Visibility::Internal)?;
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn repository_by_owner_and_name() {
+        let s = fixture().await;
+        let v = run(&s, r#"{ repository(owner: "ACME/platform", name: "api") {
+            name nameWithOwner resourcePath visibility isPrivate
+            owner { __typename login ... on Organization { parentOrganization { login } } }
+        } }"#)
+        .await;
+        assert_eq!(
+            v["repository"],
+            serde_json::json!({
+                "name": "api", "nameWithOwner": "acme/platform/api", "resourcePath": "/acme/platform/api",
+                "visibility": "INTERNAL", "isPrivate": false,
+                "owner": { "__typename": "Organization", "login": "acme/platform", "parentOrganization": { "login": "acme" } }
+            })
+        );
+        let v = run(&s, r#"{ repository(owner: "acme", name: "api") { name } }"#).await;
+        assert!(v["repository"].is_null());
+    }
+
+    #[tokio::test]
+    async fn owners_and_connections() {
+        let s = fixture().await;
+        let v = run(&s, r#"{
+            user(login: "alice") { login repositories(first: 10) { totalCount nodes { name } } }
+            notAnOrg: organization(login: "alice") { login }
+            organization(login: "acme") {
+                repositories { nodes { nameWithOwner } }
+                subOrganizations { totalCount nodes { login } }
+            }
+            repositoryOwner(login: "acme/platform") { __typename resourcePath }
+            repositories(first: 2) { totalCount nodes { nameWithOwner } }
+        }"#)
+        .await;
+        assert_eq!(v["user"]["repositories"], serde_json::json!({ "totalCount": 1, "nodes": [{ "name": "dotfiles" }] }));
+        assert!(v["notAnOrg"].is_null());
+        assert_eq!(v["organization"]["repositories"]["nodes"], serde_json::json!([{ "nameWithOwner": "acme/site" }]));
+        assert_eq!(v["organization"]["subOrganizations"]["nodes"], serde_json::json!([{ "login": "acme/platform" }]));
+        assert_eq!(v["repositoryOwner"], serde_json::json!({ "__typename": "Organization", "resourcePath": "/acme/platform" }));
+        assert_eq!(v["repositories"]["totalCount"], 3);
+        assert_eq!(v["repositories"]["nodes"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn resource_by_url() {
+        let s = fixture().await;
+        let q = |url: &str| format!(r#"{{ resource(url: "{url}") {{ __typename resourcePath }} }}"#);
+        let cases = [
+            ("/acme", Some(("Organization", "/acme"))),
+            ("https://example.com/acme/platform", Some(("Organization", "/acme/platform"))),
+            ("/acme/platform/api", Some(("Repository", "/acme/platform/api"))),
+            ("/acme/platform/api/tree/main/src?x=1", Some(("Repository", "/acme/platform/api"))),
+            ("/Alice/dotfiles/blob/main/.vimrc", Some(("Repository", "/alice/dotfiles"))),
+            ("/alice", Some(("User", "/alice"))),
+            ("/acme/nope", None),
+            ("/", None),
+        ];
+        for (url, want) in cases {
+            let v = run(&s, &q(url)).await;
+            match want {
+                Some((ty, path)) => assert_eq!(
+                    v["resource"],
+                    serde_json::json!({ "__typename": ty, "resourcePath": path }),
+                    "{url}"
+                ),
+                None => assert!(v["resource"].is_null(), "{url}"),
+            }
+        }
+    }
 }

@@ -1,20 +1,28 @@
 <script setup lang="ts">
 const props = defineProps<{
-  repo: string
-  gitRef: string
-  path: string
+  /** Full owner path, e.g. `acme/platform`. */
+  owner: string
+  repo?: string
+  gitRef?: string
+  path?: string
 }>()
 
 const crumbs = computed(() => {
-  const list = [
-    { label: 'repos', href: '/repos' },
-    { label: props.repo, href: `/${props.repo}/tree/${props.gitRef}` },
-  ]
+  const list = [{ label: 'repos', href: '/repos' }]
   let acc = ''
-  if (props.path) {
-    for (const seg of props.path.split('/')) {
-      acc = acc ? `${acc}/${seg}` : seg
-      list.push({ label: seg, href: `/${props.repo}/tree/${props.gitRef}/${acc}` })
+  for (const seg of props.owner.split('/')) {
+    acc = acc ? `${acc}/${seg}` : seg
+    list.push({ label: seg, href: `/${acc}` })
+  }
+  if (props.repo) {
+    const repoHref = `/${props.owner}/${props.repo}`
+    list.push({ label: props.repo, href: props.gitRef ? `${repoHref}/tree/${props.gitRef}` : repoHref })
+    let pathAcc = ''
+    if (props.path) {
+      for (const seg of props.path.split('/')) {
+        pathAcc = pathAcc ? `${pathAcc}/${seg}` : seg
+        list.push({ label: seg, href: `${repoHref}/tree/${props.gitRef}/${pathAcc}` })
+      }
     }
   }
   return list

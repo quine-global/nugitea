@@ -20,11 +20,14 @@ git client --HTTP/SSH--> [nugitea: app tier]  --internal API-->  [nugitea-storag
 ```
 
 The app tier never touches a local git path or subprocess — it only knows
-repo *names* and proxies git protocol bytes to the storage tier. The
-storage tier trusts its caller (no auth of its own), the same way Gitaly
-trusts the Rails app tier; `Authorizer` checks happen once, at the app
-tier, before a request is ever proxied. Still no users, no login — just
-clone, push, mirror, and a minimal read-only file browser.
+repo *paths* (`owner/name`, or `org/sub-org/.../name` under nested orgs)
+and proxies git protocol bytes to the storage tier. The storage tier
+trusts its caller (no auth of its own), the same way Gitaly trusts the
+Rails app tier; `Authorizer` checks happen once, at the app tier, before
+a request is ever proxied. Repos have owners — users and (optionally
+nested) orgs — but there's still no login, so nothing enforces who can
+do what yet: just clone, push, mirror, and a minimal read-only file
+browser.
 
 The browsing UI is a third, independent piece: a Nuxt.js app (`web/`) that
 speaks only GraphQL to the app tier's `/graphql` endpoint. It doesn't know
@@ -35,14 +38,17 @@ Three deployables total, always run separately — there's no embedded
 single-process mode:
 
 - **`nugitea` (app tier)**: `httpgit.rs` (smart-HTTP) and `sshgit.rs` (SSH)
-  are thin reverse proxies — validate the repo name, check `Authorizer`,
-  forward to the storage tier. `graphql.rs` exposes a GitHub-schema-flavored
-  GraphQL API (`repository(name) { object(expression: "ref:path") { ... on
-  Tree | ... on Blob } }`) for browsing repo contents — see that file's doc
-  comment for the full schema. The mirror scheduler (`mirror/`) lives here
-  too; `mirrors.json` is app-tier state (schedule bookkeeping, not git
-  data), while the actual `git fetch`/`git push --mirror` calls are proxied
-  through `storage_client.rs`.
+  are thin reverse proxies — resolve the repo path against the accounts
+  directory (case-insensitively, like GitHub), check `Authorizer`, forward
+  to the storage tier. `graphql.rs` exposes a GitHub-compatible GraphQL API
+  (`repository(owner:, name:)`, `repositoryOwner`/`user`/`organization(login:)`,
+  `resource(url:)`, `object(expression: "ref:path") { ... on Tree | ... on
+  Blob }`) — see that file's doc comment for the full schema and the one
+  extension (nested orgs). App-tier state lives in `--state-dir`:
+  `accounts.json` (users, orgs, repo ownership — see `accounts/`) and
+  `mirrors.json` (mirror schedule bookkeeping). The mirror scheduler
+  (`mirror/`) lives here too, while the actual `git fetch`/`git push
+  --mirror` calls are proxied through `storage_client.rs`.
 - **`nugitea-storaged` (storage tier)**: owns the repo-root disk
   (`storage.rs`), installs hooks, and exposes two internal listeners:
   - an HTTP API (`storage_server.rs`) for everything that's naturally
@@ -69,15 +75,17 @@ single-process mode:
   (`NUXT_GRAPHQL_URL`), the browser resolves it via whatever address the
   host can reach (`NUXT_PUBLIC_GRAPHQL_URL`).
 
-`names.rs` holds the one shared, pure (no I/O) repo-name validation and
-wire-form parsing used by both Rust tiers.
+`names.rs` holds the one shared, pure (no I/O) repo-path validation and
+wire-form parsing used by both Rust tiers. On disk, a repo lives at
+`<repo-root>/<owner path>/<name>.git`.
 
-`accounts.rs` models users, orgs (optionally nested, GitLab-style),
-org membership and base permissions, nested teams, custom repo roles,
+`accounts/` models users, orgs (optionally nested, GitLab-style), org
+membership and base permissions, nested teams, custom repo roles,
 enterprises (including managed/EMU ones), blocks, and role grants — one
 model covering how Gitea, GitHub, and GitLab arrange them (see its doc
-comment for the comparison). It's models only for now: repos are still a flat namespace
-on the storage tier, and nothing consults it yet.
+comment for the comparison). Account and repo ownership are live — every
+repo path resolves through it — but memberships and grants aren't
+enforced yet, since nothing logs in.
 
 ## Running it: three processes, always
 
@@ -110,22 +118,33 @@ restarts.
 Once it's up:
 
 ```sh
-docker compose exec app nugitea repo create demo --storage http://storaged:9080
-git clone http://localhost:3080/demo.git
-git clone ssh://localhost:2222/demo.git
+docker compose exec app nugitea user create alice
+docker compose exec app nugitea repo create alice/demo
+docker compose exec app nugitea org create acme
+docker compose exec app nugitea org create acme/platform   # a nested org
+docker compose exec app nugitea repo create acme/platform/api --visibility internal
+git clone http://localhost:3080/alice/demo.git
+git clone ssh://localhost:2222/acme/platform/api.git
 # push something, then browse it:
-open http://localhost:3000/demo        # or just visit it in a browser
+open http://localhost:3000/alice/demo        # or just visit it in a browser
 ```
+
+Admin commands run inside the `app` container because that's where
+`accounts.json` lives (compose sets `NUGITEA_STATE_DIR` and
+`NUGITEA_STORAGE` there, so no flags are needed). `org create` and `repo
+create` take `--visibility public|internal|private` (default `public`); a
+child can't be more visible than its parent.
 
 There are no fixtures baked into the image — a fresh instance starts with
 zero repos and an empty `/repos` page. `scripts/seed-fixtures.sh` creates
-two small demo repos (`foobar`, `barbaz`) the same way a real client
-would — `nugitea repo create` followed by an actual `git commit`/push, not
-a shortcut that writes to the storage tier's disk directly — and is safe
-to re-run (it skips repos that already exist):
+an org `demo` with a nested org `demo/tools` and a small repo in each, the
+same way a real client would — `nugitea org/repo create` followed by an
+actual `git commit`/push, not a shortcut that writes to the storage
+tier's disk directly — and is safe to re-run (it skips anything that
+already exists):
 
 ```sh
-scripts/seed-fixtures.sh http://localhost:3080 http://localhost:9080
+scripts/seed-fixtures.sh http://localhost:3080
 open http://localhost:3000/repos
 ```
 
@@ -141,14 +160,18 @@ cargo build --release
 ./target/release/nugitea serve --http :3080 --ssh :2222 \
     --storage http://127.0.0.1:9080 --storage-tcp 127.0.0.1:9081 --state-dir ./state
 
-./target/release/nugitea repo create demo --storage http://127.0.0.1:9080
-git clone http://localhost:3080/demo.git
-git clone ssh://localhost:2222/demo.git
+# admin commands read/write the same state dir as `serve`
+export NUGITEA_STATE_DIR=./state NUGITEA_STORAGE=http://127.0.0.1:9080
+./target/release/nugitea user create alice
+./target/release/nugitea repo create alice/demo
+git clone http://localhost:3080/alice/demo.git
+git clone ssh://localhost:2222/alice/demo.git
 
-./target/release/nugitea mirror add-pull --interval 5m --storage http://127.0.0.1:9080 \
-    --state-dir ./state demo https://example.com/some/repo.git
-./target/release/nugitea mirror add-push --interval 5m --storage http://127.0.0.1:9080 \
-    --state-dir ./state demo git@example.com:backup/demo.git
+./target/release/nugitea mirror add-pull --interval 5m alice/demo https://example.com/some/repo.git
+./target/release/nugitea mirror add-push --interval 5m alice/demo git@example.com:backup/demo.git
+
+# seed demo content (see above)
+NUGITEA=./target/release/nugitea scripts/seed-fixtures.sh
 
 # frontend — a separate process, run from web/
 cd web && npm install
@@ -157,11 +180,14 @@ NUXT_PUBLIC_GRAPHQL_URL=http://localhost:3080/graphql \
 npm run dev
 ```
 
-Once something's been pushed, browse it at `http://localhost:3000/demo`
+Once something's been pushed, browse it at `http://localhost:3000/alice/demo`
 (or the Nuxt dev server's own port, `3001` by default) — that redirects to
 the default branch (`main` if it exists, else `master`, else whatever
 branch sorts first) and lets you walk the tree, view file contents, and
-press `/` to search the whole repo's file list in real time. The GraphQL
+press `/` to search the whole repo's file list in real time. URLs follow
+GitHub's shape (`/owner/repo/tree/<ref>/<path>`, `/owner/repo/blob/...`),
+with the owner part growing a segment per nested org; `/<owner>` lists an
+owner's repos and sub-orgs. The GraphQL
 API itself has an interactive GraphiQL page at `GET http://localhost:3080/graphql`.
 
 Env var equivalents for the Rust CLI: `NUGITEA_STORAGE` /
@@ -169,7 +195,16 @@ Env var equivalents for the Rust CLI: `NUGITEA_STORAGE` /
 `NUGITEA_STATE_DIR` (app tier's `--state-dir`), `NUGITEA_REPO_ROOT`
 (storage tier's `repo`/`hook` subcommands). `nugitea-storaged repo
 create/list` also works directly on the storage node, bypassing the HTTP
-API, for operators logged in there. Durations accept a single `s`/`m`/`h`
+API, for operators logged in there — but a repo created that way has no
+entry in `accounts.json`, so the app tier won't serve it until one is
+added.
+
+Upgrading from before repos had owners: flat `<repo-root>/<name>.git`
+repos aren't reachable any more (a repo path needs an owner). Move each
+one to `<repo-root>/<owner>/<name>.git` and create the owner and repo
+entries with `nugitea user/org create`; `repo create` fails if the
+directory already exists, so add the `accounts.json` entry before moving
+the repo in place. Durations accept a single `s`/`m`/`h`
 suffix (e.g. `30s`, `5m`, `2h`) — a deliberately smaller subset of Go's
 duration syntax.
 

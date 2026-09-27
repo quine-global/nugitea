@@ -1,9 +1,10 @@
 //! Users, orgs, teams, and enterprises — one model that can express how
 //! Gitea, GitHub, and GitLab each arrange them, covering GitHub's full
-//! account/org/enterprise feature set. Models only: nothing here is wired
-//! into the transports or storage tier yet (repos are still a flat
-//! namespace there); this is the shape the `Authorizer` seam will
-//! eventually consult.
+//! account/org/enterprise feature set. The app tier persists a
+//! `Directory` as `accounts.json` (see `Store`) and resolves every repo
+//! path against it; the storage tier just lays repos out on disk by that
+//! path. Memberships, grants, and `effective_access` aren't enforced yet
+//! — the `Authorizer` seam is still `AllowAll`, since nothing logs in.
 //!
 //! How the three compare:
 //!
@@ -71,6 +72,9 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::names;
+
+mod store;
+pub use store::Store;
 
 /// Ids are allocated from one counter across every kind, so they're
 /// unique globally and never reused. They stay stable across renames,
@@ -199,14 +203,15 @@ pub struct Account {
 }
 
 impl Account {
-    fn parent(&self) -> Option<Id> {
+    /// The parent org of a sub-org; None for top-level orgs and users.
+    pub fn parent(&self) -> Option<Id> {
         match self.kind {
             AccountKind::Org { parent, .. } => parent,
             AccountKind::User { .. } => None,
         }
     }
 
-    fn is_org(&self) -> bool {
+    pub fn is_org(&self) -> bool {
         matches!(self.kind, AccountKind::Org { .. })
     }
 }
@@ -331,6 +336,22 @@ impl Directory {
         self.teams.get(&id)
     }
 
+    pub fn accounts(&self) -> impl Iterator<Item = &Account> {
+        self.accounts.values()
+    }
+
+    pub fn repos(&self) -> impl Iterator<Item = &Repo> {
+        self.repos.values()
+    }
+
+    pub fn repos_owned_by(&self, owner: Id) -> impl Iterator<Item = &Repo> {
+        self.repos.values().filter(move |r| r.owner == owner)
+    }
+
+    pub fn child_orgs(&self, org: Id) -> impl Iterator<Item = &Account> {
+        self.accounts.values().filter(move |a| a.parent() == Some(org))
+    }
+
     fn org(&self, id: Id) -> Result<&Account> {
         match self.accounts.get(&id) {
             Some(a) if a.is_org() => Ok(a),
@@ -400,12 +421,12 @@ impl Directory {
 
     pub fn add_org(&mut self, slug: &str, parent: Option<Id>, visibility: Visibility) -> Result<Id> {
         if let Some(p) = parent {
-            let p = self.org(p).context("parent must be an org")?;
-            if visibility > p.visibility {
-                bail!("org {slug:?} can't be more visible than its parent");
-            }
+            self.org(p).context("parent must be an org")?;
         }
         self.check_slug(parent, slug)?;
+        if parent.is_some_and(|p| visibility > self.accounts[&p].visibility) {
+            bail!("org {slug:?} can't be more visible than its parent");
+        }
         let id = self.alloc();
         self.accounts.insert(id, Account {
             id,
@@ -414,6 +435,16 @@ impl Directory {
             kind: AccountKind::Org { parent, enterprise: None, base_role: None },
         });
         Ok(id)
+    }
+
+    /// `add_org` by full path: `acme/platform` creates `platform` under
+    /// the existing org `acme`.
+    pub fn add_org_at(&mut self, path: &str, visibility: Visibility) -> Result<Id> {
+        let (parent, slug) = match path.rsplit_once('/') {
+            Some((p, slug)) => (Some(self.resolve(p).with_context(|| format!("no org {p:?}"))?), slug),
+            None => (None, path),
+        };
+        self.add_org(slug, parent, visibility)
     }
 
     pub fn set_base_role(&mut self, org: Id, role: Option<Role>) -> Result<()> {
@@ -502,16 +533,24 @@ impl Directory {
 
     pub fn add_repo(&mut self, owner: Id, slug: &str, visibility: Visibility) -> Result<Id> {
         let o = self.accounts.get(&owner).with_context(|| format!("no account with id {owner}"))?;
+        self.check_slug(Some(owner), slug)?;
         if visibility > o.visibility {
             bail!("repo {slug:?} can't be more visible than its owner");
         }
         if matches!(o.kind, AccountKind::User { managed_by: Some(_) }) && visibility == Visibility::Public {
             bail!("managed users can't own public repos");
         }
-        self.check_slug(Some(owner), slug)?;
         let id = self.alloc();
         self.repos.insert(id, Repo { id, owner, slug: slug.to_string(), visibility });
         Ok(id)
+    }
+
+    /// `add_repo` by full path: `acme/platform/api` creates `api` owned by
+    /// the existing account `acme/platform`.
+    pub fn add_repo_at(&mut self, path: &str, visibility: Visibility) -> Result<Id> {
+        let (owner, slug) = path.rsplit_once('/').with_context(|| format!("repo {path:?} needs an owner"))?;
+        let owner = self.resolve(owner).with_context(|| format!("no user or org {owner:?}"))?;
+        self.add_repo(owner, slug, visibility)
     }
 
     pub fn add_custom_role(&mut self, org: Id, name: &str, base: Role, permissions: &[&str]) -> Result<Id> {
@@ -1184,6 +1223,18 @@ mod tests {
         assert_eq!(Role::from_gitlab(50), Some(Role::Admin));
         assert_eq!(Role::from_gitea(4), Some(Role::Admin));
         assert_eq!(Role::from_gitea(0), None);
+    }
+
+    #[test]
+    fn add_by_path() {
+        let mut f = fixture();
+        let tools = f.dir.add_org_at("acme/platform/tools", Visibility::Private).unwrap();
+        let cli = f.dir.add_repo_at("ACME/platform/tools/cli", Visibility::Private).unwrap();
+        assert_eq!(f.dir.account(tools).unwrap().parent(), Some(f.platform));
+        assert_eq!(f.dir.repo_path(cli).as_deref(), Some("acme/platform/tools/cli"));
+        assert!(f.dir.add_repo_at("nobody/x", Visibility::Public).is_err());
+        assert!(f.dir.add_repo_at("flat", Visibility::Public).is_err());
+        assert!(f.dir.add_org_at("nobody/x", Visibility::Public).is_err());
     }
 
     #[test]
