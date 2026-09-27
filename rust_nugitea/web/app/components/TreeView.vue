@@ -22,7 +22,7 @@ const { data } = await useAsyncData(
   () => `tree-${props.repo}-${expression.value}`,
   () =>
     graphqlRequest<TreeData>(
-      `query($owner: String!, $name: String!, $expr: String!) {
+      /* GraphQL */ `query($owner: String!, $name: String!, $expr: String!) {
         repository(owner: $owner, name: $name) {
           object(expression: $expr) {
             __typename

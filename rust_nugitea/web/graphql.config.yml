@@ -1,0 +1,8 @@
+# Read by editor GraphQL tooling (e.g. the GraphQL: Language Feature
+# Support extension in VS Code) to autocomplete and validate the query
+# strings in app/ against the app tier's schema. schema.graphql is
+# generated from the Rust side:
+#   cargo run --bin nugitea -- graphql-schema > web/schema.graphql
+# and a Rust test fails if it's stale.
+schema: schema.graphql
+documents: 'app/**/*.{vue,ts}'

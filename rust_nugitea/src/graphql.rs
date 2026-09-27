@@ -51,6 +51,13 @@ use crate::tree::EntryKind;
 
 type NugiteaSchema = Schema<Query, EmptyMutation, EmptySubscription>;
 
+/// The schema as SDL, for `nugitea graphql-schema` — the source of the
+/// frontend's checked-in `web/schema.graphql`, which editor GraphQL
+/// tooling reads to autocomplete and validate queries.
+pub fn sdl() -> String {
+    Schema::build(Query, EmptyMutation, EmptySubscription).finish().sdl()
+}
+
 pub fn schema(state: AppState) -> NugiteaSchema {
     Schema::build(Query, EmptyMutation, EmptySubscription).data(state).finish()
 }
@@ -200,6 +207,9 @@ impl Query {
     }
 }
 
+// clippy reads the macro's repeated `ty = "String"` as a duplicated
+// attribute; they're different fields.
+#[allow(clippy::duplicated_attributes)]
 #[derive(Interface)]
 #[graphql(
     field(name = "id", ty = "ID"),
@@ -542,6 +552,16 @@ mod tests {
         assert_eq!(v["repositoryOwner"], serde_json::json!({ "__typename": "Organization", "resourcePath": "/acme/platform" }));
         assert_eq!(v["repositories"]["totalCount"], 3);
         assert_eq!(v["repositories"]["nodes"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn checked_in_schema_is_current() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/web/schema.graphql");
+        let checked_in = std::fs::read_to_string(path).unwrap_or_default();
+        assert!(
+            checked_in == sdl(),
+            "web/schema.graphql is stale; regenerate it with `cargo run --bin nugitea -- graphql-schema > web/schema.graphql`"
+        );
     }
 
     #[tokio::test]

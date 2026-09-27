@@ -17,7 +17,7 @@ const { data } = await useAsyncData(
   () => `owner-${props.login}`,
   () =>
     graphqlRequest<OwnerData>(
-      `query($login: String!) {
+      /* GraphQL */ `query($login: String!) {
         repositoryOwner(login: $login) {
           __typename
           login

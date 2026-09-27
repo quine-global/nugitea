@@ -19,7 +19,7 @@ const inputEl = ref<HTMLInputElement | null>(null)
 async function loadFiles() {
   try {
     const data = await graphqlRequest<{ repository: { files: string[] } | null }>(
-      `query($owner: String!, $name: String!, $ref: String!) {
+      /* GraphQL */ `query($owner: String!, $name: String!, $ref: String!) {
         repository(owner: $owner, name: $name) { files(ref: $ref) }
       }`,
       { ...splitRepo(props.repo), ref: props.gitRef }

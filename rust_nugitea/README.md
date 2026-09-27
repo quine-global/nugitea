@@ -208,6 +208,25 @@ the repo in place. Durations accept a single `s`/`m`/`h`
 suffix (e.g. `30s`, `5m`, `2h`) — a deliberately smaller subset of Go's
 duration syntax.
 
+## Development tooling
+
+- **Rust**: `cargo fmt` (configured by `rustfmt.toml`), `cargo clippy
+  --all-targets`, `cargo test`.
+- **Frontend** (from `web/`): `npm run typecheck` (vue-tsc over the Nuxt
+  app — TypeScript is pinned to 6.x, since 7's native compiler doesn't
+  expose the JS API vue-tsc builds on), `npm run format` /
+  `format:check` (Prettier, `.prettierrc.json`).
+- **GraphQL**: `web/schema.graphql` is the app tier's schema as SDL,
+  checked in so editor tooling can autocomplete and validate the
+  `/* GraphQL */`-tagged query strings in `web/app/` (config in
+  `web/graphql.config.yml`). Regenerate it after changing `graphql.rs`
+  with `cargo run --bin nugitea -- graphql-schema > web/schema.graphql`;
+  a `cargo test` fails if it's stale.
+- **VS Code**: the repo root's `.vscode/` recommends rust-analyzer,
+  Vue (Volar), Prettier, and the GraphQL extensions, points
+  rust-analyzer at this crate (it isn't at the workspace root), and
+  formats on save.
+
 ## Known simplifications from the single-process version
 
 - The SSH transport no longer forwards the git subprocess's raw OS-level

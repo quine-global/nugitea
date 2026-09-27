@@ -49,6 +49,8 @@ enum Cmd {
         #[command(subcommand)]
         cmd: MirrorCmd,
     },
+    /// Print the GraphQL schema as SDL (see web/schema.graphql).
+    GraphqlSchema,
 }
 
 #[derive(Args)]
@@ -152,6 +154,10 @@ async fn main() -> Result<()> {
         Cmd::Org { cmd } => cmd_org(cmd).await,
         Cmd::Repo { cmd } => cmd_repo(cmd).await,
         Cmd::Mirror { cmd } => cmd_mirror(cmd).await,
+        Cmd::GraphqlSchema => {
+            print!("{}", graphql::sdl());
+            Ok(())
+        }
     }
 }
 

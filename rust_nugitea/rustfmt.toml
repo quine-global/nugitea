@@ -1,0 +1,2 @@
+# Wider than rustfmt's default 100 to match this crate's existing style.
+max_width = 120

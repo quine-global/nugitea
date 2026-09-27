@@ -18,7 +18,7 @@ const { data } = await useAsyncData(
   () => `resource-${url.value}`,
   () =>
     graphqlRequest<{ resource: Resource | null }>(
-      `query($url: String!) {
+      /* GraphQL */ `query($url: String!) {
         resource(url: $url) {
           __typename
           resourcePath
@@ -48,8 +48,11 @@ const view = computed(() => {
   }
   const [kind, gitRef, ...path] = rest.value
   if (!kind) return { kind: 'repo-root' as const }
-  if ((kind === 'tree' && gitRef) || (kind === 'blob' && gitRef && path.length)) {
-    return { kind, repo: r.nameWithOwner, gitRef, path: path.join('/') }
+  if (kind === 'tree' && gitRef) {
+    return { kind: 'tree' as const, repo: r.nameWithOwner, gitRef, path: path.join('/') }
+  }
+  if (kind === 'blob' && gitRef && path.length) {
+    return { kind: 'blob' as const, repo: r.nameWithOwner, gitRef, path: path.join('/') }
   }
   return null
 })

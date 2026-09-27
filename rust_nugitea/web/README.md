@@ -1,75 +1,15 @@
-# Nuxt Minimal Starter
+# web
 
-Look at the [Nuxt documentation](https://nuxt.com/docs/getting-started/introduction) to learn more.
+nugitea's browsing UI: a Nuxt app that speaks only GraphQL to the app
+tier. See `../README.md` for how it fits with the other two processes and
+how to run it.
 
-## Setup
-
-Make sure to install dependencies:
-
-```bash
-# npm
+```sh
 npm install
-
-# pnpm
-pnpm install
-
-# yarn
-yarn install
-
-# bun
-bun install
+npm run dev            # needs NUXT_GRAPHQL_URL / NUXT_PUBLIC_GRAPHQL_URL pointing at the app tier
+npm run typecheck
+npm run format         # or format:check
 ```
 
-## Development Server
-
-Start the development server on `http://localhost:3000`:
-
-```bash
-# npm
-npm run dev
-
-# pnpm
-pnpm dev
-
-# yarn
-yarn dev
-
-# bun
-bun run dev
-```
-
-## Production
-
-Build the application for production:
-
-```bash
-# npm
-npm run build
-
-# pnpm
-pnpm build
-
-# yarn
-yarn build
-
-# bun
-bun run build
-```
-
-Locally preview production build:
-
-```bash
-# npm
-npm run preview
-
-# pnpm
-pnpm preview
-
-# yarn
-yarn preview
-
-# bun
-bun run preview
-```
-
-Check out the [deployment documentation](https://nuxt.com/docs/getting-started/deployment) for more information.
+`schema.graphql` is generated from the Rust side — don't edit it by hand
+(see "Development tooling" in `../README.md`).

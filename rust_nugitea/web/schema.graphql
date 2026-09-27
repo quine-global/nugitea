@@ -1,0 +1,141 @@
+type Blob implements GitObject {
+	oid: String!
+	isBinary: Boolean!
+	text: String
+	byteSize: Int!
+}
+
+interface GitObject {
+	oid: String!
+}
+
+type Organization implements RepositoryOwner & UniformResourceLocatable {
+	id: ID!
+	"""
+	The org's full path — just its slug for a top-level org, like
+	GitHub; `parent/child` for a sub-org.
+	"""
+	login: String!
+	resourcePath: String!
+	repositories(first: Int): RepositoryConnection!
+	"""
+	nugitea extension: the org this one is nested under, if any.
+	"""
+	parentOrganization: Organization
+	"""
+	nugitea extension: orgs nested directly under this one.
+	"""
+	subOrganizations(first: Int): OrganizationConnection!
+}
+
+type OrganizationConnection {
+	nodes: [Organization!]!
+	totalCount: Int!
+}
+
+type Query {
+	repository(owner: String!, name: String!): Repository
+	repositoryOwner(login: String!): RepositoryOwner
+	user(login: String!): User
+	organization(login: String!): Organization
+	"""
+	Resolves a URL or path to the user, org, or repo it names. Walks
+	owner segments until one names a repo, then stops — so trailing
+	segments (`/tree/main/src`) still resolve to the repo, and the
+	caller can compare `resourcePath` to see what's left over.
+	Unambiguous because a sub-org and a repo can't share a name
+	within the same parent.
+	"""
+	resource(url: String!): UniformResourceLocatable
+	"""
+	Every repo, across all owners (nugitea extension).
+	"""
+	repositories(first: Int): RepositoryConnection!
+}
+
+type Ref {
+	name: String!
+}
+
+type Repository implements UniformResourceLocatable {
+	id: ID!
+	name: String!
+	nameWithOwner: String!
+	owner: RepositoryOwner!
+	resourcePath: String!
+	visibility: RepositoryVisibility!
+	isPrivate: Boolean!
+	"""
+	`main` if it exists, else `master`, else whichever branch sorts
+	first, else `null` — since HEAD in a freshly created bare repo
+	doesn't reliably reflect what was actually pushed.
+	"""
+	defaultBranchRef: Ref
+	refs: [Ref!]!
+	"""
+	Full recursive file list for the search feature — see the module
+	doc comment for why this isn't literal GitHub API shape.
+	"""
+	files(ref: String!): [String!]!
+	"""
+	Resolves a `"ref"` or `"ref:path"` expression to a `Tree` or
+	`Blob`. Tried as a tree first (a no-op-cheap `git ls-tree`); if
+	that fails on a non-empty path, it's tried as a blob instead — a
+	path can't be both, so git itself is the source of truth on which
+	one an expression resolves to, rather than nugitea guessing from
+	the shape of the path string.
+	"""
+	object(expression: String!): GitObject
+}
+
+type RepositoryConnection {
+	nodes: [Repository!]!
+	totalCount: Int!
+}
+
+interface RepositoryOwner {
+	id: ID!
+	login: String!
+	resourcePath: String!
+	repositories(first: Int): RepositoryConnection!
+}
+
+enum RepositoryVisibility {
+	PUBLIC
+	INTERNAL
+	PRIVATE
+}
+
+type Tree implements GitObject {
+	oid: String!
+	entries: [TreeEntry!]!
+}
+
+type TreeEntry {
+	name: String!
+	type: String!
+	oid: String!
+}
+
+interface UniformResourceLocatable {
+	resourcePath: String!
+}
+
+type User implements RepositoryOwner & UniformResourceLocatable {
+	id: ID!
+	login: String!
+	resourcePath: String!
+	repositories(first: Int): RepositoryConnection!
+}
+
+"""
+Directs the executor to include this field or fragment only when the `if` argument is true.
+"""
+directive @include(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+"""
+Directs the executor to skip this field or fragment when the `if` argument is true.
+"""
+directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+schema {
+	query: Query
+}

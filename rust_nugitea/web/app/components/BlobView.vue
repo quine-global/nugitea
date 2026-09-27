@@ -18,7 +18,7 @@ const { data } = await useAsyncData(
   () => `blob-${props.repo}-${expression.value}`,
   () =>
     graphqlRequest<BlobData>(
-      `query($owner: String!, $name: String!, $expr: String!) {
+      /* GraphQL */ `query($owner: String!, $name: String!, $expr: String!) {
         repository(owner: $owner, name: $name) {
           object(expression: $expr) {
             __typename
