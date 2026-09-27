@@ -50,9 +50,7 @@ pub fn router(store: Arc<Store>) -> Router {
 /// subprocess environment. Re-checked here even though the app tier
 /// already validates it — don't blindly trust a "trusted" caller either.
 fn is_safe_protocol_header(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '=' | ';' | ',' | '.' | '_' | '-'))
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '=' | ';' | ',' | '.' | '_' | '-'))
 }
 
 async fn list_repos(State(store): State<Arc<Store>>) -> Response {
@@ -92,10 +90,7 @@ async fn info_refs(
     Path(name): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let Some(service) = params
-        .get("service")
-        .and_then(|s| s.strip_prefix("git-"))
-        .and_then(Service::from_http_param)
+    let Some(service) = params.get("service").and_then(|s| s.strip_prefix("git-")).and_then(Service::from_http_param)
     else {
         return (StatusCode::BAD_REQUEST, "unknown service").into_response();
     };
@@ -121,11 +116,21 @@ async fn info_refs(
     body.into_response()
 }
 
-async fn upload_pack(state: State<Arc<Store>>, path: Path<String>, headers: HeaderMap, req: axum::extract::Request) -> Response {
+async fn upload_pack(
+    state: State<Arc<Store>>,
+    path: Path<String>,
+    headers: HeaderMap,
+    req: axum::extract::Request,
+) -> Response {
     stream_service(state, path, headers, req, Service::UploadPack).await
 }
 
-async fn receive_pack(state: State<Arc<Store>>, path: Path<String>, headers: HeaderMap, req: axum::extract::Request) -> Response {
+async fn receive_pack(
+    state: State<Arc<Store>>,
+    path: Path<String>,
+    headers: HeaderMap,
+    req: axum::extract::Request,
+) -> Response {
     stream_service(state, path, headers, req, Service::ReceivePack).await
 }
 
@@ -163,10 +168,7 @@ async fn stream_service(
     let stdout = child.stdout.take().expect("piped stdout");
     let mut stderr = child.stderr.take().expect("piped stderr");
 
-    let is_gzip = headers
-        .get(header::CONTENT_ENCODING)
-        .map(|v| v.as_bytes() == b"gzip")
-        .unwrap_or(false);
+    let is_gzip = headers.get(header::CONTENT_ENCODING).map(|v| v.as_bytes() == b"gzip").unwrap_or(false);
     let body_stream = req.into_body().into_data_stream();
 
     tokio::spawn(async move {
@@ -195,10 +197,7 @@ async fn stream_service(
         }
     });
 
-    Response::builder()
-        .status(StatusCode::OK)
-        .body(Body::from_stream(ReaderStream::new(stdout)))
-        .unwrap()
+    Response::builder().status(StatusCode::OK).body(Body::from_stream(ReaderStream::new(stdout))).unwrap()
 }
 
 #[derive(Deserialize)]
@@ -209,7 +208,11 @@ struct RunGitRequest {
 /// Generic unary git command for mirror operations (remote add/remove,
 /// fetch, push --mirror) — the only git invocations that don't need
 /// request/response body streaming.
-async fn run_git(State(store): State<Arc<Store>>, Path(name): Path<String>, Json(req): Json<RunGitRequest>) -> Response {
+async fn run_git(
+    State(store): State<Arc<Store>>,
+    Path(name): Path<String>,
+    Json(req): Json<RunGitRequest>,
+) -> Response {
     let Ok(repo_path) = store.path(&name) else {
         return StatusCode::NOT_FOUND.into_response();
     };

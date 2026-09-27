@@ -30,11 +30,7 @@ pub struct StorageClient {
 
 impl StorageClient {
     pub fn new(base_url: String, tcp_addr: String) -> Self {
-        StorageClient {
-            base_url: base_url.trim_end_matches('/').to_string(),
-            tcp_addr,
-            http: reqwest::Client::new(),
-        }
+        StorageClient { base_url: base_url.trim_end_matches('/').to_string(), tcp_addr, http: reqwest::Client::new() }
     }
 
     fn url(&self, path: &str) -> String {
@@ -84,12 +80,7 @@ impl StorageClient {
         struct Req<'a> {
             args: &'a [&'a str],
         }
-        let resp = self
-            .http
-            .post(self.url(&format!("/repos/{}/git", seg(name))))
-            .json(&Req { args })
-            .send()
-            .await?;
+        let resp = self.http.post(self.url(&format!("/repos/{}/git", seg(name)))).json(&Req { args }).send().await?;
         if !resp.status().is_success() {
             bail!("git {args:?} on {name:?}: {}", resp.text().await.unwrap_or_default());
         }

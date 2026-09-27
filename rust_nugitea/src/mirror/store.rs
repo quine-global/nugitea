@@ -30,10 +30,7 @@ impl Entry {
 }
 
 pub fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
 /// Persists mirror configuration to a JSON file under the repo root.
@@ -47,10 +44,7 @@ impl Store {
     /// it doesn't already exist.
     pub fn new(root: &std::path::Path) -> Result<Self> {
         std::fs::create_dir_all(root).with_context(|| format!("create state dir {root:?}"))?;
-        Ok(Store {
-            path: root.join("mirrors.json"),
-            lock: Mutex::new(()),
-        })
+        Ok(Store { path: root.join("mirrors.json"), lock: Mutex::new(()) })
     }
 
     async fn load(&self) -> Result<Vec<Entry>> {

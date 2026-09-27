@@ -18,14 +18,19 @@ const { data } = await useAsyncData(
   () => `blob-${props.repo}-${expression.value}`,
   () =>
     graphqlRequest<BlobData>(
-      /* GraphQL */ `query($owner: String!, $name: String!, $expr: String!) {
-        repository(owner: $owner, name: $name) {
-          object(expression: $expr) {
-            __typename
-            ... on Blob { text isBinary }
+      /* GraphQL */ `
+        query ($owner: String!, $name: String!, $expr: String!) {
+          repository(owner: $owner, name: $name) {
+            object(expression: $expr) {
+              __typename
+              ... on Blob {
+                text
+                isBinary
+              }
+            }
           }
         }
-      }`,
+      `,
       { ...splitRepo(props.repo), expr: expression.value }
     ),
   { watch: [() => props.repo, expression] }

@@ -62,11 +62,7 @@ pub async fn list_tree(repo_path: &Path, git_ref: &str, path: &str) -> Result<Ve
     check_no_leading_dash(git_ref, "ref")?;
     check_no_leading_dash(path, "path")?;
 
-    let treeish = if path.is_empty() {
-        git_ref.to_string()
-    } else {
-        format!("{git_ref}:{path}")
-    };
+    let treeish = if path.is_empty() { git_ref.to_string() } else { format!("{git_ref}:{path}") };
     let output = gitcmd::run_captured(repo_path, &["ls-tree", &treeish]).await?;
 
     let mut entries = Vec::new();
@@ -83,11 +79,7 @@ pub async fn list_tree(repo_path: &Path, git_ref: &str, path: &str) -> Result<Ve
             "blob" => EntryKind::Blob,
             _ => continue, // commit (submodule) entries etc. — not browsable here
         };
-        entries.push(TreeEntry {
-            name: name.to_string(),
-            kind,
-            sha: sha.to_string(),
-        });
+        entries.push(TreeEntry { name: name.to_string(), kind, sha: sha.to_string() });
     }
     Ok(entries)
 }

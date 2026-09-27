@@ -4,7 +4,15 @@ interface ReposData {
 }
 
 const { data } = await useAsyncData('repos', () =>
-  graphqlRequest<ReposData>(/* GraphQL */ `query { repositories { nodes { nameWithOwner } } }`)
+  graphqlRequest<ReposData>(/* GraphQL */ `
+    query {
+      repositories {
+        nodes {
+          nameWithOwner
+        }
+      }
+    }
+  `)
 )
 
 const repos = computed(() => data.value?.repositories.nodes ?? [])

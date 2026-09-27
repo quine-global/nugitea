@@ -482,7 +482,8 @@ mod tests {
     /// A schema over a real accounts.json in a temp dir. The storage tier
     /// isn't running, so only owner-side fields are queryable.
     async fn schema_with(setup: impl FnOnce(&mut Directory) -> anyhow::Result<()>) -> NugiteaSchema {
-        let dir = std::env::temp_dir().join(format!("nugitea-graphql-test-{}-{}", std::process::id(), rand::random::<u64>()));
+        let dir =
+            std::env::temp_dir().join(format!("nugitea-graphql-test-{}-{}", std::process::id(), rand::random::<u64>()));
         let accounts = Arc::new(accounts::Store::new(&dir).unwrap());
         accounts.update(setup).await.unwrap();
         schema(AppState {
@@ -514,10 +515,13 @@ mod tests {
     #[tokio::test]
     async fn repository_by_owner_and_name() {
         let s = fixture().await;
-        let v = run(&s, r#"{ repository(owner: "ACME/platform", name: "api") {
+        let v = run(
+            &s,
+            r#"{ repository(owner: "ACME/platform", name: "api") {
             name nameWithOwner resourcePath visibility isPrivate
             owner { __typename login ... on Organization { parentOrganization { login } } }
-        } }"#)
+        } }"#,
+        )
         .await;
         assert_eq!(
             v["repository"],
@@ -534,7 +538,9 @@ mod tests {
     #[tokio::test]
     async fn owners_and_connections() {
         let s = fixture().await;
-        let v = run(&s, r#"{
+        let v = run(
+            &s,
+            r#"{
             user(login: "alice") { login repositories(first: 10) { totalCount nodes { name } } }
             notAnOrg: organization(login: "alice") { login }
             organization(login: "acme") {
@@ -543,13 +549,20 @@ mod tests {
             }
             repositoryOwner(login: "acme/platform") { __typename resourcePath }
             repositories(first: 2) { totalCount nodes { nameWithOwner } }
-        }"#)
+        }"#,
+        )
         .await;
-        assert_eq!(v["user"]["repositories"], serde_json::json!({ "totalCount": 1, "nodes": [{ "name": "dotfiles" }] }));
+        assert_eq!(
+            v["user"]["repositories"],
+            serde_json::json!({ "totalCount": 1, "nodes": [{ "name": "dotfiles" }] })
+        );
         assert!(v["notAnOrg"].is_null());
         assert_eq!(v["organization"]["repositories"]["nodes"], serde_json::json!([{ "nameWithOwner": "acme/site" }]));
         assert_eq!(v["organization"]["subOrganizations"]["nodes"], serde_json::json!([{ "login": "acme/platform" }]));
-        assert_eq!(v["repositoryOwner"], serde_json::json!({ "__typename": "Organization", "resourcePath": "/acme/platform" }));
+        assert_eq!(
+            v["repositoryOwner"],
+            serde_json::json!({ "__typename": "Organization", "resourcePath": "/acme/platform" })
+        );
         assert_eq!(v["repositories"]["totalCount"], 3);
         assert_eq!(v["repositories"]["nodes"].as_array().unwrap().len(), 2);
     }
@@ -581,11 +594,9 @@ mod tests {
         for (url, want) in cases {
             let v = run(&s, &q(url)).await;
             match want {
-                Some((ty, path)) => assert_eq!(
-                    v["resource"],
-                    serde_json::json!({ "__typename": ty, "resourcePath": path }),
-                    "{url}"
-                ),
+                Some((ty, path)) => {
+                    assert_eq!(v["resource"], serde_json::json!({ "__typename": ty, "resourcePath": path }), "{url}")
+                }
                 None => assert!(v["resource"].is_null(), "{url}"),
             }
         }

@@ -22,10 +22,7 @@ pub fn validate(name: &str) -> Result<()> {
         Some(c) if c.is_ascii_alphanumeric() || c == '_' => {}
         _ => bail!("invalid repo name {name:?}"),
     }
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
-    {
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')) {
         bail!("invalid repo name {name:?}");
     }
     Ok(())

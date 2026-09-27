@@ -22,11 +22,7 @@ pub struct Scheduler {
 
 impl Scheduler {
     pub fn new(storage: Arc<StorageClient>, mirrors: Arc<MirrorStore>) -> Arc<Self> {
-        Arc::new(Scheduler {
-            storage,
-            mirrors,
-            locks: StdMutex::new(HashMap::new()),
-        })
+        Arc::new(Scheduler { storage, mirrors, locks: StdMutex::new(HashMap::new()) })
     }
 
     /// Ticks forever.
@@ -77,9 +73,6 @@ impl Scheduler {
 
     fn lock_for(&self, entry: &Entry) -> Arc<Mutex<()>> {
         let mut locks = self.locks.lock().unwrap();
-        locks
-            .entry(format!("{:?}:{}", entry.direction, entry.repo))
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
+        locks.entry(format!("{:?}:{}", entry.direction, entry.repo)).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
     }
 }

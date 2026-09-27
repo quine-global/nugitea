@@ -37,10 +37,7 @@ impl server::Server for GitHandler {
     type Handler = Self;
 
     fn new_client(&mut self, _addr: Option<SocketAddr>) -> Self {
-        GitHandler {
-            inner: self.inner.clone(),
-            stdins: Arc::new(Mutex::new(HashMap::new())),
-        }
+        GitHandler { inner: self.inner.clone(), stdins: Arc::new(Mutex::new(HashMap::new())) }
     }
 }
 
@@ -49,11 +46,7 @@ impl server::Handler for GitHandler {
 
     // No users/login: accept any offered key. This is a stub seam,
     // structured like auth::Authorizer, for real key-checking later.
-    async fn auth_publickey(
-        &mut self,
-        _user: &str,
-        _key: &russh::keys::PublicKey,
-    ) -> Result<Auth, Self::Error> {
+    async fn auth_publickey(&mut self, _user: &str, _key: &russh::keys::PublicKey) -> Result<Auth, Self::Error> {
         Ok(Auth::Accept)
     }
 
@@ -88,23 +81,14 @@ impl server::Handler for GitHandler {
         Ok(())
     }
 
-    async fn data(
-        &mut self,
-        channel: ChannelId,
-        data: &[u8],
-        _session: &mut Session,
-    ) -> Result<(), Self::Error> {
+    async fn data(&mut self, channel: ChannelId, data: &[u8], _session: &mut Session) -> Result<(), Self::Error> {
         if let Some(tx) = self.stdins.lock().await.get(&channel) {
             let _ = tx.send(Bytes::copy_from_slice(data));
         }
         Ok(())
     }
 
-    async fn channel_eof(
-        &mut self,
-        channel: ChannelId,
-        _session: &mut Session,
-    ) -> Result<(), Self::Error> {
+    async fn channel_eof(&mut self, channel: ChannelId, _session: &mut Session) -> Result<(), Self::Error> {
         // Dropping the sender closes the forwarder stream, which signals
         // the end of the request body to the storage tier.
         self.stdins.lock().await.remove(&channel);
@@ -120,10 +104,7 @@ impl GitHandler {
         };
         let service = Service::from_ssh_verb(verb).with_context(|| format!("unsupported command {verb:?}"))?;
         let state = &self.inner.state;
-        let repo_name = state
-            .resolve(repo_ref)
-            .await
-            .with_context(|| format!("repository {repo_ref:?} not found"))?;
+        let repo_name = state.resolve(repo_ref).await.with_context(|| format!("repository {repo_ref:?} not found"))?;
         if !service.allow(state.auth.as_ref(), &repo_name) {
             bail!("forbidden");
         }
@@ -191,15 +172,9 @@ impl GitHandler {
 /// Starts the SSH server and blocks.
 pub async fn serve(state: AppState, addr: SocketAddr, host_key_path: PathBuf) -> Result<()> {
     let key = load_or_create_host_key(&host_key_path)?;
-    let config = Arc::new(server::Config {
-        keys: vec![key],
-        ..Default::default()
-    });
+    let config = Arc::new(server::Config { keys: vec![key], ..Default::default() });
 
-    let mut handler = GitHandler {
-        inner: Arc::new(Inner { state }),
-        stdins: Arc::new(Mutex::new(HashMap::new())),
-    };
+    let mut handler = GitHandler { inner: Arc::new(Inner { state }), stdins: Arc::new(Mutex::new(HashMap::new())) };
 
     println!("ssh: listening on {addr}");
     handler.run_on_address(config, addr).await?;

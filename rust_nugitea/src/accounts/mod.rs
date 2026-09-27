@@ -393,12 +393,8 @@ impl Directory {
 
     fn insert_user(&mut self, slug: String, managed_by: Option<Id>) -> Id {
         let id = self.alloc();
-        self.accounts.insert(id, Account {
-            id,
-            slug,
-            visibility: Visibility::Public,
-            kind: AccountKind::User { managed_by },
-        });
+        self.accounts
+            .insert(id, Account { id, slug, visibility: Visibility::Public, kind: AccountKind::User { managed_by } });
         id
     }
 
@@ -409,11 +405,8 @@ impl Directory {
 
     /// Creates an EMU account named `<handle>_<shortcode>`.
     pub fn add_managed_user(&mut self, enterprise: Id, handle: &str) -> Result<Id> {
-        let shortcode = self
-            .enterprise(enterprise)?
-            .shortcode
-            .clone()
-            .context("only a managed enterprise has managed users")?;
+        let shortcode =
+            self.enterprise(enterprise)?.shortcode.clone().context("only a managed enterprise has managed users")?;
         let slug = format!("{handle}_{shortcode}");
         self.check_slug(None, &slug)?;
         Ok(self.insert_user(slug, Some(enterprise)))
@@ -428,12 +421,15 @@ impl Directory {
             bail!("org {slug:?} can't be more visible than its parent");
         }
         let id = self.alloc();
-        self.accounts.insert(id, Account {
+        self.accounts.insert(
             id,
-            slug: slug.to_string(),
-            visibility,
-            kind: AccountKind::Org { parent, enterprise: None, base_role: None },
-        });
+            Account {
+                id,
+                slug: slug.to_string(),
+                visibility,
+                kind: AccountKind::Org { parent, enterprise: None, base_role: None },
+            },
+        );
         Ok(id)
     }
 
@@ -470,11 +466,8 @@ impl Directory {
             }
         }
         let id = self.alloc();
-        self.enterprises.insert(id, Enterprise {
-            id,
-            slug: slug.to_string(),
-            shortcode: shortcode.map(str::to_string),
-        });
+        self.enterprises
+            .insert(id, Enterprise { id, slug: slug.to_string(), shortcode: shortcode.map(str::to_string) });
         Ok(id)
     }
 
@@ -520,14 +513,7 @@ impl Directory {
             }
         }
         let id = self.alloc();
-        self.teams.insert(id, Team {
-            id,
-            org,
-            parent,
-            slug: slug.to_string(),
-            privacy,
-            members: BTreeMap::new(),
-        });
+        self.teams.insert(id, Team { id, org, parent, slug: slug.to_string(), privacy, members: BTreeMap::new() });
         Ok(id)
     }
 
@@ -561,13 +547,16 @@ impl Directory {
             bail!("role {name:?} already exists");
         }
         let id = self.alloc();
-        self.custom_roles.insert(id, CustomRole {
+        self.custom_roles.insert(
             id,
-            org,
-            name: name.to_string(),
-            base,
-            permissions: permissions.iter().map(|p| p.to_string()).collect(),
-        });
+            CustomRole {
+                id,
+                org,
+                name: name.to_string(),
+                base,
+                permissions: permissions.iter().map(|p| p.to_string()).collect(),
+            },
+        );
         Ok(id)
     }
 
@@ -612,9 +601,7 @@ impl Directory {
 
     /// The user's role in an org, direct or inherited from an ancestor.
     pub fn org_role(&self, org: Id, user: Id) -> Option<OrgRole> {
-        self.ancestors(org)
-            .filter_map(|a| self.org_members.get(&a.id)?.get(&user).copied())
-            .max()
+        self.ancestors(org).filter_map(|a| self.org_members.get(&a.id)?.get(&user).copied()).max()
     }
 
     pub fn is_org_member(&self, org: Id, user: Id) -> bool {
@@ -851,10 +838,7 @@ impl Directory {
     pub fn resolve(&self, path: &str) -> Option<Id> {
         let mut parent = None;
         for seg in path.split('/') {
-            let a = self
-                .accounts
-                .values()
-                .find(|a| a.parent() == parent && a.slug.eq_ignore_ascii_case(seg))?;
+            let a = self.accounts.values().find(|a| a.parent() == parent && a.slug.eq_ignore_ascii_case(seg))?;
             parent = Some(a.id);
         }
         parent
@@ -864,10 +848,7 @@ impl Directory {
     pub fn resolve_repo(&self, path: &str) -> Option<Id> {
         let (owner, slug) = path.rsplit_once('/')?;
         let owner = self.resolve(owner)?;
-        self.repos
-            .values()
-            .find(|r| r.owner == owner && r.slug.eq_ignore_ascii_case(slug))
-            .map(|r| r.id)
+        self.repos.values().find(|r| r.owner == owner && r.slug.eq_ignore_ascii_case(slug)).map(|r| r.id)
     }
 
     // ---- access -----------------------------------------------------
@@ -883,9 +864,9 @@ impl Directory {
         let enterprise = self.enterprise_of(r.owner);
         let floor = match r.visibility {
             Visibility::Public => Some(Role::Read),
-            Visibility::Internal => user
-                .filter(|&u| enterprise.is_none_or(|e| self.is_enterprise_member(e, u)))
-                .map(|_| Role::Read),
+            Visibility::Internal => {
+                user.filter(|&u| enterprise.is_none_or(|e| self.is_enterprise_member(e, u))).map(|_| Role::Read)
+            }
             Visibility::Private => None,
         };
         let mut access = Access { role: floor, permissions: BTreeSet::new() };
@@ -1081,7 +1062,8 @@ mod tests {
         f.dir.grant(Principal::User(f.bob), Resource::Org(f.platform), Role::Read).unwrap();
         assert_eq!(f.dir.effective_role(Some(f.bob), f.api), Some(Role::Write));
         f.dir.revoke(Principal::Team(f.devs), Resource::Repo(f.api));
-        assert_eq!(f.dir.effective_role(Some(f.bob), f.api), Some(Role::Triage)); // still has acme's
+        assert_eq!(f.dir.effective_role(Some(f.bob), f.api), Some(Role::Triage));
+        // still has acme's
     }
 
     #[test]

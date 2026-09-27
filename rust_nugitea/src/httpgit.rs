@@ -50,9 +50,7 @@ impl AppState {
 /// catch-all per method that splits off the fixed suffix itself. More
 /// specific routes merged alongside (e.g. `/graphql`) still win.
 pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/{*path}", get(get_git).post(post_git))
-        .with_state(state)
+    Router::new().route("/{*path}", get(get_git).post(post_git)).with_state(state)
 }
 
 async fn get_git(state: State<AppState>, Path(path): Path<String>, query: Query<HashMap<String, String>>) -> Response {
@@ -77,15 +75,9 @@ async fn info_refs(
     repo_git: &str,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let Some(service) = params
-        .get("service")
-        .and_then(|s| s.strip_prefix("git-"))
-        .and_then(Service::from_http_param)
+    let Some(service) = params.get("service").and_then(|s| s.strip_prefix("git-")).and_then(Service::from_http_param)
     else {
-        return (
-            StatusCode::BAD_REQUEST,
-            "smart HTTP only: service must be git-upload-pack or git-receive-pack",
-        )
+        return (StatusCode::BAD_REQUEST, "smart HTTP only: service must be git-upload-pack or git-receive-pack")
             .into_response();
     };
     let Some(repo_name) = state.resolve(repo_git).await else {
@@ -127,21 +119,11 @@ async fn service_handler(
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    let git_protocol = headers
-        .get("Git-Protocol")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    let is_gzip = headers
-        .get(header::CONTENT_ENCODING)
-        .map(|v| v.as_bytes() == b"gzip")
-        .unwrap_or(false);
+    let git_protocol = headers.get("Git-Protocol").and_then(|v| v.to_str().ok()).map(str::to_string);
+    let is_gzip = headers.get(header::CONTENT_ENCODING).map(|v| v.as_bytes() == b"gzip").unwrap_or(false);
     let body = reqwest::Body::wrap_stream(req.into_body().into_data_stream());
 
-    match state
-        .storage
-        .stream_git(&repo_name, service, git_protocol.as_deref(), is_gzip, body)
-        .await
-    {
+    match state.storage.stream_git(&repo_name, service, git_protocol.as_deref(), is_gzip, body).await {
         Ok(stream) => Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, format!("application/x-git-{}-result", service.git_arg()))

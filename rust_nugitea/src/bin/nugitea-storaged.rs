@@ -68,14 +68,10 @@ async fn main() -> Result<()> {
 
 async fn cmd_serve(args: ServeArgs) -> Result<()> {
     let store = Arc::new(Store::new(&args.repo_root)?);
-    let http_addr: std::net::SocketAddr = args
-        .http
-        .parse()
-        .map_err(|e| anyhow::anyhow!("invalid address {:?}: {e}", args.http))?;
-    let tcp_addr: std::net::SocketAddr = args
-        .tcp
-        .parse()
-        .map_err(|e| anyhow::anyhow!("invalid address {:?}: {e}", args.tcp))?;
+    let http_addr: std::net::SocketAddr =
+        args.http.parse().map_err(|e| anyhow::anyhow!("invalid address {:?}: {e}", args.http))?;
+    let tcp_addr: std::net::SocketAddr =
+        args.tcp.parse().map_err(|e| anyhow::anyhow!("invalid address {:?}: {e}", args.tcp))?;
 
     let http_store = store.clone();
     let http_task = tokio::spawn(async move {
@@ -131,7 +127,5 @@ async fn cmd_hook(name: String, _rest: Vec<String>) -> Result<()> {
 }
 
 fn repo_root_from_env() -> PathBuf {
-    std::env::var("NUGITEA_REPO_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("./data"))
+    std::env::var("NUGITEA_REPO_ROOT").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("./data"))
 }

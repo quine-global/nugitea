@@ -1,2 +1,4 @@
-# Wider than rustfmt's default 100 to match this crate's existing style.
+# Wider than rustfmt's default 100, with its width heuristics maxed out,
+# to match this crate's existing style (long one-line chains and calls).
 max_width = 120
+use_small_heuristics = "Max"

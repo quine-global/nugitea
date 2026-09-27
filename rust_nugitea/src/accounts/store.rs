@@ -19,10 +19,7 @@ impl Store {
     /// it doesn't already exist.
     pub fn new(root: &Path) -> Result<Self> {
         std::fs::create_dir_all(root).with_context(|| format!("create state dir {root:?}"))?;
-        Ok(Store {
-            path: root.join("accounts.json"),
-            lock: Mutex::new(()),
-        })
+        Ok(Store { path: root.join("accounts.json"), lock: Mutex::new(()) })
     }
 
     async fn read(&self) -> Result<Directory> {

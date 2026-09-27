@@ -27,10 +27,7 @@ fn command(args: &[&str]) -> Command {
 pub async fn run_captured(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let output = command(args).current_dir(dir).output().await?;
     if !output.status.success() {
-        bail!(
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        bail!("git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
     }
     Ok(output.stdout)
 }
@@ -53,9 +50,7 @@ pub fn spawn_piped(dir: Option<&Path>, args: &[&str], extra_env: &[(String, Stri
     if let Some(dir) = dir {
         cmd.current_dir(dir);
     }
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     for (key, value) in extra_env {
         cmd.env(key, value);
     }

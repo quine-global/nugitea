@@ -280,16 +280,14 @@ async fn cmd_mirror(cmd: MirrorCmd) -> Result<()> {
 /// flag, then `NUGITEA_STORAGE`, then a localhost default for single-node
 /// dev.
 fn storage_addr(flag: Option<String>) -> String {
-    flag.or_else(|| std::env::var("NUGITEA_STORAGE").ok())
-        .unwrap_or_else(|| "http://127.0.0.1:9080".to_string())
+    flag.or_else(|| std::env::var("NUGITEA_STORAGE").ok()).unwrap_or_else(|| "http://127.0.0.1:9080".to_string())
 }
 
 /// Resolves the storage tier's raw git-exec TCP address (used only by
 /// `serve`, for the SSH transport): an explicit flag, then
 /// `NUGITEA_STORAGE_TCP`, then a localhost default.
 fn storage_tcp_addr(flag: Option<String>) -> String {
-    flag.or_else(|| std::env::var("NUGITEA_STORAGE_TCP").ok())
-        .unwrap_or_else(|| "127.0.0.1:9081".to_string())
+    flag.or_else(|| std::env::var("NUGITEA_STORAGE_TCP").ok()).unwrap_or_else(|| "127.0.0.1:9081".to_string())
 }
 
 /// Resolves the app tier's local state directory (accounts.json,

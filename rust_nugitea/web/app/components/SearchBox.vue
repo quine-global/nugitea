@@ -19,9 +19,13 @@ const inputEl = ref<HTMLInputElement | null>(null)
 async function loadFiles() {
   try {
     const data = await graphqlRequest<{ repository: { files: string[] } | null }>(
-      /* GraphQL */ `query($owner: String!, $name: String!, $ref: String!) {
-        repository(owner: $owner, name: $name) { files(ref: $ref) }
-      }`,
+      /* GraphQL */ `
+        query ($owner: String!, $name: String!, $ref: String!) {
+          repository(owner: $owner, name: $name) {
+            files(ref: $ref)
+          }
+        }
+      `,
       { ...splitRepo(props.repo), ref: props.gitRef }
     )
     files.value = data.repository?.files ?? []
@@ -90,13 +94,7 @@ function hrefFor(f: string) {
   <div class="search-island">
     <button class="search-toggle" @click="openAndFocus">search files (<kbd>/</kbd>)</button>
     <div class="search-panel" :class="{ hidden: !open }">
-      <input
-        ref="inputEl"
-        v-model="query"
-        type="text"
-        placeholder="filter files..."
-        @keydown.escape="open = false"
-      />
+      <input ref="inputEl" v-model="query" type="text" placeholder="filter files..." @keydown.escape="open = false" />
       <ul class="search-results">
         <li v-for="f in results" :key="f">
           <NuxtLink :to="hrefFor(f)">{{ f }}</NuxtLink>

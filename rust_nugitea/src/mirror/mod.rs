@@ -48,9 +48,7 @@ async fn configure(
     // Ignore the error: fine if no remote existed yet.
     let _ = storage.run_git(repo_name, &["remote", "remove", REMOTE_NAME]).await;
 
-    storage
-        .run_git(repo_name, &["remote", "add", mirror_flag, REMOTE_NAME, remote_url])
-        .await?;
+    storage.run_git(repo_name, &["remote", "add", mirror_flag, REMOTE_NAME, remote_url]).await?;
 
     mirrors
         .add(Entry {
@@ -63,10 +61,22 @@ async fn configure(
         .await
 }
 
-pub async fn add_pull(storage: &StorageClient, mirrors: &Store, repo_name: &str, remote_url: &str, interval: Duration) -> Result<()> {
+pub async fn add_pull(
+    storage: &StorageClient,
+    mirrors: &Store,
+    repo_name: &str,
+    remote_url: &str,
+    interval: Duration,
+) -> Result<()> {
     configure(storage, mirrors, repo_name, remote_url, interval, Direction::Pull).await
 }
 
-pub async fn add_push(storage: &StorageClient, mirrors: &Store, repo_name: &str, remote_url: &str, interval: Duration) -> Result<()> {
+pub async fn add_push(
+    storage: &StorageClient,
+    mirrors: &Store,
+    repo_name: &str,
+    remote_url: &str,
+    interval: Duration,
+) -> Result<()> {
     configure(storage, mirrors, repo_name, remote_url, interval, Direction::Push).await
 }

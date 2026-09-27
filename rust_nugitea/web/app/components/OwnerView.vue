@@ -17,14 +17,27 @@ const { data } = await useAsyncData(
   () => `owner-${props.login}`,
   () =>
     graphqlRequest<OwnerData>(
-      /* GraphQL */ `query($login: String!) {
-        repositoryOwner(login: $login) {
-          __typename
-          login
-          repositories { nodes { name nameWithOwner } }
-          ... on Organization { subOrganizations { nodes { login } } }
+      /* GraphQL */ `
+        query ($login: String!) {
+          repositoryOwner(login: $login) {
+            __typename
+            login
+            repositories {
+              nodes {
+                name
+                nameWithOwner
+              }
+            }
+            ... on Organization {
+              subOrganizations {
+                nodes {
+                  login
+                }
+              }
+            }
+          }
         }
-      }`,
+      `,
       { login: props.login }
     ),
   { watch: [() => props.login] }

@@ -18,13 +18,20 @@ const { data } = await useAsyncData(
   () => `resource-${url.value}`,
   () =>
     graphqlRequest<{ resource: Resource | null }>(
-      /* GraphQL */ `query($url: String!) {
-        resource(url: $url) {
-          __typename
-          resourcePath
-          ... on Repository { nameWithOwner defaultBranchRef { name } }
+      /* GraphQL */ `
+        query ($url: String!) {
+          resource(url: $url) {
+            __typename
+            resourcePath
+            ... on Repository {
+              nameWithOwner
+              defaultBranchRef {
+                name
+              }
+            }
+          }
         }
-      }`,
+      `,
       { url: url.value }
     ),
   { watch: [url] }
