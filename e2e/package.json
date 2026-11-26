@@ -7,6 +7,6 @@
     "cy:open": "cypress open"
   },
   "devDependencies": {
-    "cypress": "16.1.0"
+    "cypress": "16.4.0"
   }
 }
